@@ -776,9 +776,21 @@ type Post = { title: string; body: string; };
 		)
 	})
 
-	it('ignores non-object type aliases', () => {
+	it('extracts non-object type aliases (primitives, unions, arrays)', () => {
 		const aliases = extractTypeAliases('type Name = string;')
-		expect(Object.keys(aliases)).toEqual([])
+		expect(aliases['Name']).toEqual('string')
+
+		const unionAliases = extractTypeAliases('type Status = "active" | "inactive";')
+		expect(unionAliases['Status']).toEqual('"active" | "inactive"')
+
+		const arrayAliases = extractTypeAliases('type Items = Array<string>;')
+		expect(arrayAliases['Items']).toEqual('Array<string>')
+	})
+
+	it('handles multiline union types with leading pipe', () => {
+		const source = `type Color =\n  | "red"\n  | "blue"\n  | "green";`
+		const aliases = extractTypeAliases(source)
+		expect(aliases['Color']).toEqual('"red" | "blue" | "green"')
 	})
 })
 

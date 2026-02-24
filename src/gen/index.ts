@@ -122,15 +122,16 @@ export function extractRootObjects(code: string) {
  */
 export function extractTypeAliases(declaration: string): Record<string, string> {
 	const aliases: Record<string, string> = {}
-	const typePattern = /\btype\s+(\w+)\s*=\s*/g
+	const typePattern = /\btype\s+(\w+)\s*(?:<[^>]*>)?\s*=\s*/g
 	let match: RegExpExecArray | null
 
 	while ((match = typePattern.exec(declaration)) !== null) {
 		const name = match[1]
 		const startIdx = match.index + match[0].length
+		const ch = declaration[startIdx]
 
-		// If the type body starts with `{`, scan for the matching `}`
-		if (declaration[startIdx] === '{') {
+		if (ch === '{') {
+			// Object type: scan for matching `}`
 			let depth = 0
 			let end = startIdx
 			for (; end < declaration.length; end++) {
@@ -149,10 +150,120 @@ export function extractTypeAliases(declaration: string): Record<string, string> 
 				.replace(/\/\/[^\n]*/g, '')
 				// Strip multi-line comments
 				.replace(/\/\*[\s\S]*?\*\//g, '')
+		} else {
+			// Non-object type (Array<...>, union, primitive, etc.):
+			// scan until we hit a semicolon at depth 0, or a newline that
+			// ISN'T followed by a union/intersection continuation (| or &).
+			let depth = 0
+			let end = startIdx
+			for (; end < declaration.length; end++) {
+				const c = declaration[end]
+				if (c === '<' || c === '(' || c === '{' || c === '[') depth++
+				else if (c === '>' || c === ')' || c === '}' || c === ']') depth--
+				else if (depth === 0 && c === ';') break
+				else if (depth === 0 && c === '\n') {
+					// Check if the text so far ends with | or & (continuation)
+					const soFar = declaration.slice(startIdx, end).trimEnd()
+					if (soFar.endsWith('|') || soFar.endsWith('&') || soFar.endsWith('=')) continue
+
+					// Check if the next non-whitespace char is | or & (continuation)
+					let peek = end + 1
+					while (peek < declaration.length && (declaration[peek] === ' ' || declaration[peek] === '\t' || declaration[peek] === '\n' || declaration[peek] === '\r')) peek++
+					if (peek < declaration.length && (declaration[peek] === '|' || declaration[peek] === '&')) continue
+
+					break
+				}
+			}
+			let body = declaration
+				.slice(startIdx, end)
+				.trim()
+				.replace(/\/\/[^\n]*/g, '')
+				.replace(/\/\*[\s\S]*?\*\//g, '')
+				// Collapse whitespace for cleaner output
+				.replace(/\s+/g, ' ')
+				.trim()
+			// Strip leading `|` or `&` from union/intersection types
+			// (TS allows `type X = | "a" | "b"` but TypeBox doesn't)
+			if (body.startsWith('|') || body.startsWith('&'))
+				body = body.slice(1).trim()
+			if (body) aliases[name] = body
 		}
 	}
 
 	return aliases
+}
+
+/**
+ * Extract TypeScript `enum` declarations from source code and return
+ * a map of enum name -> union of string literal values.
+ *
+ * Only handles string enums (e.g. `enum X { A = "a", B = "b" }`).
+ * Numeric or computed enums are skipped.
+ */
+export function extractEnums(source: string): Record<string, string> {
+	const result: Record<string, string> = {}
+	const pattern = /\benum\s+(\w+)\s*\{([^}]*)\}/g
+	let match: RegExpExecArray | null
+
+	while ((match = pattern.exec(source)) !== null) {
+		const name = match[1]
+		const body = match[2]
+		const literals: string[] = []
+		const memberPattern = /=\s*["']([^"']+)["']/g
+		let memberMatch: RegExpExecArray | null
+		while ((memberMatch = memberPattern.exec(body)) !== null) {
+			literals.push(`"${memberMatch[1]}"`)
+		}
+		if (literals.length > 0) {
+			result[name] = literals.join(' | ')
+		}
+	}
+	return result
+}
+
+/**
+ * Extract `const X = ["a", "b", "c"] as const` declarations from source code
+ * and return a map of name -> union of literal values (e.g. `'"a" | "b" | "c"'`).
+ *
+ * This allows resolving `(typeof X)[number]` patterns that TypeBox can't handle.
+ */
+export function extractConstArrays(source: string): Record<string, string> {
+	const result: Record<string, string> = {}
+	const pattern =
+		/\bconst\s+(\w+)\s*=\s*\[([^\]]*)\]\s*as\s+const/g
+	let match: RegExpExecArray | null
+
+	while ((match = pattern.exec(source)) !== null) {
+		const name = match[1]
+		const arrayBody = match[2]
+		// Extract string literals from the array body
+		const literals: string[] = []
+		const litPattern = /["']([^"']+)["']/g
+		let litMatch: RegExpExecArray | null
+		while ((litMatch = litPattern.exec(arrayBody)) !== null) {
+			literals.push(`"${litMatch[1]}"`)
+		}
+		if (literals.length > 0) {
+			result[name] = literals.join(' | ')
+		}
+	}
+	return result
+}
+
+/**
+ * Replace `(typeof X)[number]` patterns with the resolved union type
+ * from const array declarations.
+ */
+export function resolveTypeofIndexed(
+	code: string,
+	constArrays: Record<string, string>
+): string {
+	return code.replace(
+		/\(typeof\s+(\w+)\)\s*\[\s*number\s*\]/g,
+		(_match, name) => {
+			return constArrays[name] ?? _match
+		}
+	)
 }
 
 /**
@@ -193,8 +304,9 @@ export function resolveImportedTypes(
 		existsSync: (path: string) => boolean
 		readFileSync: (path: string, encoding: BufferEncoding) => string
 	}
-): Record<string, string> {
+): { aliases: Record<string, string>; constArrays: Record<string, string> } {
 	const aliases = { ...existingAliases }
+	const constArrays: Record<string, string> = {}
 
 	// Collect all import("...").TypeName references
 	const importPattern = /import\("([^"]+)"\)\.(\w+)/g
@@ -208,7 +320,7 @@ export function resolveImportedTypes(
 		imports.get(modulePath)!.add(typeName)
 	}
 
-	if (imports.size === 0) return aliases
+	if (imports.size === 0) return { aliases, constArrays }
 
 	let ts: typeof import('typescript')
 	try {
@@ -265,9 +377,56 @@ export function resolveImportedTypes(
 			const source = fs.readFileSync(resolvedFile, 'utf8')
 			const moduleAliases = extractTypeAliases(source)
 
+			// Merge ALL type aliases from the resolved file (not just
+			// the ones we're looking for) so sibling types used in
+			// their bodies are also available for inlining.
+			Object.assign(aliases, moduleAliases)
+
+			// Also extract `const X = [...] as const` declarations
+			// so we can resolve `(typeof X)[number]` patterns later
+			Object.assign(constArrays, extractConstArrays(source))
+			// Extract enums and add them as type aliases
+			const enums = extractEnums(source)
+			Object.assign(aliases, enums)
+
+			// Check which requested types we still need
+			const remaining = new Set<string>()
 			for (const typeName of typeNames) {
-				if (moduleAliases[typeName]) {
-					aliases[typeName] = moduleAliases[typeName]
+				if (!aliases[typeName]) remaining.add(typeName)
+			}
+
+			// If some types weren't found, follow `export * from "..."` re-exports
+			if (remaining.size > 0) {
+				const reExportPattern = /export\s+\*\s+from\s+["']([^"']+)["']/g
+				let reMatch: RegExpExecArray | null
+				while ((reMatch = reExportPattern.exec(source)) !== null) {
+					if (remaining.size === 0) break
+
+					const relPath = reMatch[1]
+					// Resolve relative to the barrel file's directory
+					const barrelDir = resolvedFile.replace(/\/[^/]+$/, '')
+					let subFile = join(barrelDir, relPath)
+					// Try .ts extension if not present
+					if (!subFile.endsWith('.ts') && !subFile.endsWith('.tsx')) {
+						if (fs.existsSync(subFile + '.ts')) subFile += '.ts'
+						else if (fs.existsSync(subFile + '.tsx')) subFile += '.tsx'
+						else if (fs.existsSync(join(subFile, 'index.ts'))) subFile = join(subFile, 'index.ts')
+						else continue
+					}
+					if (!fs.existsSync(subFile)) continue
+
+					try {
+						const subSource = fs.readFileSync(subFile, 'utf8')
+						const subAliases = extractTypeAliases(subSource)
+						Object.assign(aliases, subAliases)
+						Object.assign(constArrays, extractConstArrays(subSource))
+						Object.assign(aliases, extractEnums(subSource))
+						for (const typeName of remaining) {
+							if (aliases[typeName]) remaining.delete(typeName)
+						}
+					} catch {
+						// Skip unreadable sub-files
+					}
 				}
 			}
 		} catch {
@@ -275,7 +434,7 @@ export function resolveImportedTypes(
 		}
 	}
 
-	return aliases
+	return { aliases, constArrays }
 }
 
 /**
@@ -413,9 +572,40 @@ function splitAtTopLevelIntersections(decl: string): string[] {
 	return parts.filter(Boolean)
 }
 
+/**
+ * Walk a JSON Schema object and replace bare `$ref` entries
+ * (unresolved type names from TypeBox) with an empty schema `{}`.
+ *
+ * TypeBox outputs `{"$ref": "TypeName"}` for types it can't resolve.
+ * These are not valid JSON Schema `$ref` URIs, so we replace them
+ * with `{}` (equivalent to `any`) to keep the spec valid.
+ */
+function replaceBareRefs(obj: any): void {
+	if (!obj || typeof obj !== 'object') return
+	if (Array.isArray(obj)) {
+		for (let i = 0; i < obj.length; i++) {
+			if (obj[i]?.$ref && !obj[i].$ref.startsWith('#')) {
+				obj[i] = {}
+			} else {
+				replaceBareRefs(obj[i])
+			}
+		}
+		return
+	}
+	for (const key of Object.keys(obj)) {
+		const val = obj[key]
+		if (val?.$ref && !val.$ref.startsWith('#')) {
+			obj[key] = {}
+		} else if (typeof val === 'object') {
+			replaceBareRefs(val)
+		}
+	}
+}
+
 export function declarationToJSONSchema(
 	declaration: string,
-	typeAliases?: Record<string, string>
+	typeAliases?: Record<string, string>,
+	constArrays?: Record<string, string>
 ) {
 	const routes: AdditionalReference = {}
 
@@ -431,16 +621,42 @@ export function declarationToJSONSchema(
 
 		// Replace import("...").TypeName with just TypeName
 		// (the type should already be in typeAliases from resolveImportedTypes)
+		// If the type has generic parameters, strip them and use the base name
+		// (generics from external packages usually can't be resolved)
 		processed = processed.replace(
-			/import\([^)]*\)\.(\w+)/g,
+			/import\([^)]*\)\.(\w+)(?:<[^>]*>)?/g,
 			'$1'
 		)
 
-		// Inline any type aliases so TypeBox resolves them
-		if (typeAliases) processed = inlineTypeReferences(processed, typeAliases)
+		// Inline any type aliases so TypeBox resolves them.
+		// Loop because inlined bodies may contain further type references
+		// (e.g. WorkflowSchema contains WorkflowOwner which also needs inlining).
+		if (typeAliases) {
+			const MAX_INLINE_PASSES = 10
+			for (let pass = 0; pass < MAX_INLINE_PASSES; pass++) {
+				const before = processed
+				processed = inlineTypeReferences(processed, typeAliases)
+				if (processed === before) break
+			}
+		}
+
+		// Resolve `(typeof X)[number]` patterns using extracted const arrays
+		if (constArrays) {
+			processed = resolveTypeofIndexed(processed, constArrays)
+		}
+
+		// Replace `Date` type with `string` so TypeBox doesn't produce
+		// the invalid `"type": "Date"` in JSON Schema. Dates serialize
+		// as ISO 8601 strings in JSON responses.
+		processed = processed.replace(/\bDate\b/g, 'string')
 
 		let schema = TypeBox(processed)
 		if (schema.type !== 'object') continue
+
+		// Replace bare `$ref` entries (unresolved type names) with `{}`
+		// TypeBox outputs `{"$ref": "TypeName"}` for types it can't resolve,
+		// but these are not valid JSON Schema refs. Replace with empty schema.
+		replaceBareRefs(schema)
 
 		const paths = []
 
@@ -747,15 +963,16 @@ export const fromTypes =
 
 			// Extract type aliases from the declaration preamble
 			// so we can inline them into route schemas
-			let typeAliases = extractTypeAliases(declaration)
+			const localAliases = extractTypeAliases(declaration)
 
 			// Resolve cross-module import("...").TypeName references
-			typeAliases = resolveImportedTypes(
+			// and collect `const X = [...] as const` declarations
+			const { aliases: typeAliases, constArrays } = resolveImportedTypes(
 				declaration,
 				projectRoot,
 				tsconfigPath,
 				src,
-				typeAliases,
+				localAliases,
 				fs
 			)
 
@@ -774,7 +991,7 @@ export const fromTypes =
 			const routeSection = extractGenericParam(instance, 4)
 			if (!routeSection) return
 
-			return declarationToJSONSchema(routeSection, typeAliases)
+			return declarationToJSONSchema(routeSection, typeAliases, constArrays)
 		} catch (error) {
 			console.warn(
 				'[@elysiajs/openapi/gen] Failed to generate OpenAPI schema'

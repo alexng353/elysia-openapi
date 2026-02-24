@@ -698,20 +698,36 @@ export function toOpenAPISchema(
 	// @ts-ignore
 	const definitions = app.getGlobalDefinitions?.().type
 
-	if (references) {
-		if (!Array.isArray(references)) references = [references]
-
-		for (let i = 0; i < references.length; i++) {
-			const reference = references[i]
-
-			if (typeof reference === 'function') references[i] = reference()
-		}
-	}
-
 	// Flatten routes to merge guard() schemas into direct hook properties
 	// This makes guard schemas accessible for OpenAPI documentation generation
 	// @ts-ignore private property
 	const routes = flattenRoutes(app.getGlobalRoutes(), vendors)
+
+	// Defer reference resolution until we know there are routes to enrich.
+	// This avoids expensive fromTypes() calls (which can OOM on large apps)
+	// when onlyExternal filters everything out.
+	if (references) {
+		let hasRoutes = !onlyExternal
+		if (!hasRoutes) {
+			for (const route of routes) {
+				if (route.hooks?.detail?.hide) continue
+				if (route.hooks?.detail?.external) { hasRoutes = true; break }
+			}
+		}
+
+		if (hasRoutes) {
+			if (!Array.isArray(references)) references = [references]
+
+			for (let i = 0; i < references.length; i++) {
+				const reference = references[i]
+
+				if (typeof reference === 'function') references[i] = reference()
+			}
+		} else {
+			references = undefined
+		}
+	}
+
 	for (const route of routes) {
 		if (route.hooks?.detail?.hide) continue
 		if (onlyExternal && !route.hooks?.detail?.external) continue

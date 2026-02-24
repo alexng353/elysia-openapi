@@ -677,7 +677,8 @@ export function toOpenAPISchema(
 	app: AnyElysia,
 	exclude?: ElysiaOpenAPIConfig['exclude'],
 	references?: AdditionalReferences,
-	vendors?: MapJsonSchema
+	vendors?: MapJsonSchema,
+	onlyExternal?: boolean
 ) {
 	let {
 		methods: excludeMethods = ['options'],
@@ -713,6 +714,7 @@ export function toOpenAPISchema(
 	const routes = flattenRoutes(app.getGlobalRoutes(), vendors)
 	for (const route of routes) {
 		if (route.hooks?.detail?.hide) continue
+		if (onlyExternal && !route.hooks?.detail?.external) continue
 
 		const method = route.method.toLowerCase()
 

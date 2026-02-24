@@ -51,9 +51,10 @@ export const openapi = <
 	scalar,
 	references,
 	mapJsonSchema,
-	embedSpec
+	embedSpec,
+	onlyExternal
 }: ElysiaOpenAPIConfig<Enabled, Path> = {}) => {
-	if (!enabled) return new Elysia({ name: '@elysiajs/openapi' })
+	if (!enabled) return new Elysia({ name: `@elysiajs/openapi:${path}` })
 
 	const info = {
 		title: 'Elysia Documentation',
@@ -99,7 +100,7 @@ export const openapi = <
 		})
 	}
 
-	const app = new Elysia({ name: '@elysiajs/openapi' })
+	const app = new Elysia({ name: `@elysiajs/openapi:${path}` })
 
 	app.use((app) => {
 		if (provider === null) return app
@@ -132,7 +133,8 @@ export const openapi = <
 														app,
 														exclude,
 														references,
-														mapJsonSchema
+														mapJsonSchema,
+														onlyExternal
 													)
 												)
 									)
@@ -163,7 +165,7 @@ export const openapi = <
 			totalRoutes = app.routes.length
 
 			return toFullSchema(
-				toOpenAPISchema(app, exclude, references, mapJsonSchema)
+				toOpenAPISchema(app, exclude, references, mapJsonSchema, onlyExternal)
 			)
 		},
 		{

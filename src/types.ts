@@ -102,6 +102,13 @@ export interface ElysiaOpenAPIConfig<
 	references?: AdditionalReferences
 
 	/**
+	 * Only include routes with `detail.external` set to `true`.
+	 * Routes without this flag are excluded from the spec.
+	 * @default false
+	 */
+	onlyExternal?: boolean
+
+	/**
 	 * Embed OpenAPI schema to provider body if possible
 	 *
 	 * This is highly discouraged, unless you really have to inline OpenAPI schema

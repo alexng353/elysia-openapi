@@ -290,28 +290,104 @@ export function resolveImportedTypes(
  * This way `extractRootObjects` and TypeBox can process each route individually.
  */
 export function flattenNestedIntersections(declaration: string): string {
-	// Repeatedly flatten until no nested intersections remain
-	let result = declaration
-	let changed = true
+	// Recursively flatten nested intersections, processing shallowest first.
+	//
+	// The previous iterative approach expanded the DEEPEST intersection first,
+	// which copied sibling intersections into every expanded member, producing
+	// a Cartesian product (M1 × M2 × ... × Mp) that OOMs on large apps.
+	//
+	// Shallowest-first expansion ensures each member is independent — siblings
+	// are NOT copied — giving linear output (M1 + M2 + ... + Mp).
+	return flattenParts(splitAtTopLevelIntersections(declaration)).join(' & ')
+}
 
-	while (changed) {
-		changed = false
-		// Find a `key: { ... } & { ... }` pattern where the `& {` is inside
-		// a property value (not at the top level between root objects).
-		// We scan for `} & {` and check if it's nested inside a property.
-		const parts = splitAtTopLevelIntersections(result)
-		const flattened: string[] = []
-
-		for (const part of parts) {
-			const expanded = expandOneLevel(part)
-			if (expanded.length > 1) changed = true
-			flattened.push(...expanded)
+function flattenParts(parts: string[]): string[] {
+	const result: string[] = []
+	for (const part of parts) {
+		const expanded = expandShallowest(part)
+		if (expanded.length === 1) {
+			result.push(expanded[0])
+		} else {
+			result.push(...flattenParts(expanded))
 		}
+	}
+	return result
+}
 
-		result = flattened.join(' & ')
+/**
+ * Find the SHALLOWEST nested `} & {` intersection and distribute the parent
+ * over it. Returns multiple strings if an intersection was found, or the
+ * original string if not. Each returned member is independent — it does NOT
+ * contain sibling intersections from other branches.
+ */
+function expandShallowest(obj: string): string[] {
+	let bestIdx = -1
+	let bestDepth = Infinity
+	let depth = 0
+
+	for (let i = 0; i < obj.length - 4; i++) {
+		const ch = obj[i]
+		if (ch === '{') depth++
+		else if (ch === '}') {
+			depth--
+			// Check for `} & {` pattern
+			if (
+				depth > 0 &&
+				depth < bestDepth &&
+				obj[i] === '}' &&
+				obj.slice(i, i + 10).match(/^\}\s*&\s*\{/)
+			) {
+				bestIdx = i
+				bestDepth = depth
+			}
+		}
 	}
 
-	return result
+	if (bestIdx === -1) return [obj]
+
+	// Find the start of the intersection group
+	let groupStart = -1
+	depth = 1
+	for (let i = bestIdx - 1; i >= 0; i--) {
+		if (obj[i] === '}') depth++
+		else if (obj[i] === '{') {
+			depth--
+			if (depth === 0) {
+				groupStart = i
+				break
+			}
+		}
+	}
+
+	if (groupStart === -1) return [obj]
+
+	// Collect all `{ ... } & { ... } & { ... }` members
+	const members: string[] = []
+	let pos = groupStart
+	while (pos < obj.length) {
+		if (obj[pos] !== '{') break
+		depth = 0
+		let end = pos
+		for (; end < obj.length; end++) {
+			if (obj[end] === '{') depth++
+			else if (obj[end] === '}') {
+				depth--
+				if (depth === 0) { end++; break }
+			}
+		}
+		members.push(obj.slice(pos, end))
+		pos = end
+		const sep = obj.slice(pos).match(/^\s*&\s*/)
+		if (sep) pos += sep[0].length
+		else break
+	}
+
+	if (members.length <= 1) return [obj]
+
+	const prefix = obj.slice(0, groupStart)
+	const suffix = obj.slice(pos)
+
+	return members.map((member) => prefix + member + suffix)
 }
 
 /**
@@ -335,91 +411,6 @@ function splitAtTopLevelIntersections(decl: string): string[] {
 	const last = decl.slice(start).trim()
 	if (last) parts.push(last)
 	return parts.filter(Boolean)
-}
-
-/**
- * Given a single object string like `{ api: { v3: { a: 1 } & { b: 2 }; }; }`,
- * find the deepest nested intersection and distribute the parent over it.
- * Returns multiple strings if an intersection was found, or the original string if not.
- */
-function expandOneLevel(obj: string): string[] {
-	// Find `} & {` at the deepest nesting level
-	let bestIdx = -1
-	let bestDepth = -1
-	let depth = 0
-
-	for (let i = 0; i < obj.length - 4; i++) {
-		const ch = obj[i]
-		if (ch === '{') depth++
-		else if (ch === '}') {
-			depth--
-			// Check for `} & {` pattern
-			const rest = obj.slice(i)
-			const m = rest.match(/^\}\s*&\s*\{/)
-			if (m && depth > bestDepth) {
-				bestIdx = i
-				bestDepth = depth
-			}
-		}
-	}
-
-	if (bestIdx === -1) return [obj]
-
-	// Find the enclosing property — walk backwards from the `} & {` to find
-	// the opening `{` at the same depth that starts this intersection group.
-	// Then walk forward to find all `& {` members.
-
-	// Find the start of the intersection group: the `{` that opened the first member.
-	// We start from `bestIdx` (the `}` in `} & {`). That `}` closes the first member,
-	// so depth starts at 1 (we're "inside" one closing brace) and we look for
-	// the `{` that brings depth back to 0.
-	let groupStart = -1
-	depth = 1
-	for (let i = bestIdx - 1; i >= 0; i--) {
-		if (obj[i] === '}') depth++
-		else if (obj[i] === '{') {
-			depth--
-			if (depth === 0) {
-				groupStart = i
-				break
-			}
-		}
-	}
-
-	if (groupStart === -1) return [obj]
-
-	// Find the end of the intersection group: scan forward from groupStart
-	// collecting all `{ ... } & { ... } & { ... }` members
-	const members: string[] = []
-	let pos = groupStart
-	while (pos < obj.length) {
-		if (obj[pos] !== '{') break
-		// Find matching close brace
-		depth = 0
-		let end = pos
-		for (; end < obj.length; end++) {
-			if (obj[end] === '{') depth++
-			else if (obj[end] === '}') {
-				depth--
-				if (depth === 0) { end++; break }
-			}
-		}
-		members.push(obj.slice(pos, end))
-		pos = end
-		// Skip ` & ` separator
-		const sep = obj.slice(pos).match(/^\s*&\s*/)
-		if (sep) pos += sep[0].length
-		else break
-	}
-
-	if (members.length <= 1) return [obj]
-
-	// The prefix is everything before groupStart, suffix is everything after the group
-	const prefix = obj.slice(0, groupStart)
-	const suffix = obj.slice(pos)
-
-	// Distribute: for each member, wrap with prefix + suffix
-	return members.map((member) => prefix + member + suffix)
 }
 
 export function declarationToJSONSchema(

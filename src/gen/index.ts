@@ -602,6 +602,37 @@ function replaceBareRefs(obj: any): void {
 	}
 }
 
+/**
+ * Walk a JSON Schema and replace `__DATETIME__` const markers
+ * (from Date -> "__DATETIME__" substitution) with proper
+ * `{ type: "string", format: "date-time" }` schemas.
+ */
+function replaceDateTimeMarkers(obj: any): void {
+	if (!obj || typeof obj !== 'object') return
+	if (Array.isArray(obj)) {
+		for (let i = 0; i < obj.length; i++) {
+			if (isDateTimeMarker(obj[i])) {
+				obj[i] = { type: 'string', format: 'date-time' }
+			} else {
+				replaceDateTimeMarkers(obj[i])
+			}
+		}
+		return
+	}
+	for (const key of Object.keys(obj)) {
+		const val = obj[key]
+		if (isDateTimeMarker(val)) {
+			obj[key] = { type: 'string', format: 'date-time' }
+		} else if (typeof val === 'object') {
+			replaceDateTimeMarkers(val)
+		}
+	}
+}
+
+function isDateTimeMarker(val: any): boolean {
+	return val && typeof val === 'object' && val.const === '__DATETIME__' && val.type === 'string'
+}
+
 export function declarationToJSONSchema(
 	declaration: string,
 	typeAliases?: Record<string, string>,
@@ -645,10 +676,10 @@ export function declarationToJSONSchema(
 			processed = resolveTypeofIndexed(processed, constArrays)
 		}
 
-		// Replace `Date` type with `string` so TypeBox doesn't produce
-		// the invalid `"type": "Date"` in JSON Schema. Dates serialize
-		// as ISO 8601 strings in JSON responses.
-		processed = processed.replace(/\bDate\b/g, 'string')
+		// Replace `Date` type with a marker so we can annotate it with
+		// `format: "date-time"` after TypeBox parsing. Using a const
+		// string literal lets TypeBox parse it without errors.
+		processed = processed.replace(/\bDate\b/g, '"__DATETIME__"')
 
 		let schema = TypeBox(processed)
 		if (schema.type !== 'object') continue
@@ -657,6 +688,9 @@ export function declarationToJSONSchema(
 		// TypeBox outputs `{"$ref": "TypeName"}` for types it can't resolve,
 		// but these are not valid JSON Schema refs. Replace with empty schema.
 		replaceBareRefs(schema)
+
+		// Replace `__DATETIME__` markers with `{ type: "string", format: "date-time" }`
+		replaceDateTimeMarkers(schema)
 
 		const paths = []
 

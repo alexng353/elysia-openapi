@@ -75,7 +75,13 @@ const isValidSchema = (schema: any): schema is TSchema =>
 	((Kind in schema && schema[Kind] !== 'Unknown') ||
 		schema.type ||
 		schema.properties ||
-		schema.items)
+		schema.items ||
+		schema.anyOf ||
+		schema.oneOf ||
+		schema.allOf ||
+		schema.$ref ||
+		schema.const !== undefined ||
+		schema.enum)
 
 export const getLoosePath = (path: string) => {
 	if (path.charCodeAt(path.length - 1) === 47)
@@ -521,7 +527,25 @@ export const unwrapSchema = (
 	if (
 		!schema?.['~standard'] &&
 		// @ts-ignore
-		(schema.$schema || schema.type || schema.properties || schema.items)
+		(schema.$schema ||
+			// @ts-ignore
+			schema.type ||
+			// @ts-ignore
+			schema.properties ||
+			// @ts-ignore
+			schema.items ||
+			// @ts-ignore
+			schema.anyOf ||
+			// @ts-ignore
+			schema.oneOf ||
+			// @ts-ignore
+			schema.allOf ||
+			// @ts-ignore
+			schema.$ref ||
+			// @ts-ignore
+			schema.const !== undefined ||
+			// @ts-ignore
+			schema.enum)
 	)
 		return schema as OpenAPIV3.SchemaObject
 

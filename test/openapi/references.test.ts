@@ -206,3 +206,153 @@ describe('OpenAPI > references', () => {
 		})
 	})
 })
+
+describe('OpenAPI > references > union-rooted schemas', () => {
+	// Covers a regression where isValidSchema / unwrapSchema only accepted
+	// schemas rooted at `type` / `properties` / `items`. Union-,
+	// intersection-, const-, enum- and $ref-rooted schemas produced by
+	// fromTypes were silently dropped at merge time.
+
+	it('merges anyOf-rooted response schemas (union return type)', () => {
+		const app = new Elysia().get('/best-key', () => {})
+
+		const schema = toOpenAPISchema(app, undefined, {
+			'/best-key': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: {
+						200: {
+							anyOf: [
+								{
+									type: 'object',
+									patternProperties: {
+										'^(.*)$': { type: 'string' }
+									}
+								},
+								{
+									type: 'object',
+									required: ['key'],
+									properties: { key: { type: 'null' } }
+								}
+							]
+						} as any
+					}
+				}
+			}
+		})
+
+		const paths = serializable(schema)?.paths as any
+		const merged =
+			paths['/best-key'].get.responses['200'].content[
+				'application/json'
+			].schema
+		expect(merged.anyOf).toBeDefined()
+		expect(merged.anyOf.length).toBe(2)
+	})
+
+	it('merges oneOf- and allOf-rooted response schemas', () => {
+		const app = new Elysia().get('/x', () => {}).get('/y', () => {})
+
+		const schema = toOpenAPISchema(app, undefined, {
+			'/x': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: {
+						200: {
+							oneOf: [
+								{ type: 'object', properties: { a: { type: 'string' } } },
+								{ type: 'object', properties: { b: { type: 'number' } } }
+							]
+						} as any
+					}
+				}
+			},
+			'/y': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: {
+						200: {
+							allOf: [
+								{ type: 'object', properties: { a: { type: 'string' } } },
+								{ type: 'object', properties: { b: { type: 'number' } } }
+							]
+						} as any
+					}
+				}
+			}
+		})
+
+		const paths = serializable(schema)?.paths as any
+		expect(
+			paths['/x'].get.responses['200'].content['application/json'].schema.oneOf
+		).toBeDefined()
+		expect(
+			paths['/y'].get.responses['200'].content['application/json'].schema.allOf
+		).toBeDefined()
+	})
+
+	it('merges const- and enum-rooted response schemas', () => {
+		const app = new Elysia().get('/c', () => {}).get('/e', () => {})
+
+		const schema = toOpenAPISchema(app, undefined, {
+			'/c': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: { 200: { const: 'ok' } as any }
+				}
+			},
+			'/e': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: { 200: { enum: ['a', 'b', 'c'] } as any }
+				}
+			}
+		})
+
+		const paths = serializable(schema)?.paths as any
+		expect(
+			paths['/c'].get.responses['200'].content['application/json'].schema.const
+		).toBe('ok')
+		expect(
+			paths['/e'].get.responses['200'].content['application/json'].schema.enum
+		).toEqual(['a', 'b', 'c'])
+	})
+
+	it('merges $ref-rooted response schemas', () => {
+		const app = new Elysia().get('/r', () => {})
+
+		const schema = toOpenAPISchema(app, undefined, {
+			'/r': {
+				get: {
+					params: {} as any,
+					query: {} as any,
+					headers: {} as any,
+					body: {} as any,
+					response: {
+						200: { $ref: '#/components/schemas/User' } as any
+					}
+				}
+			}
+		})
+
+		const paths = serializable(schema)?.paths as any
+		expect(
+			paths['/r'].get.responses['200'].content['application/json'].schema.$ref
+		).toBe('#/components/schemas/User')
+	})
+})

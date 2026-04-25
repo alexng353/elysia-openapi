@@ -117,11 +117,21 @@ export function extractRootObjects(code: string) {
 }
 
 /**
- * Extract type alias definitions from a declaration string and return
- * a map of name -> body (e.g. `User` -> `{ id: string; name: string; }`)
+ * Extract type alias and interface definitions from a declaration string
+ * and return a map of name -> body (e.g. `User` -> `{ id: string; name: string; }`).
+ *
+ * Captures both `type X = ...` and `interface X { ... }` so identifiers
+ * declared as interfaces (common in generated clients) get inlined the
+ * same way as type aliases. Without this, interface references reach
+ * TypeBox unresolved and emit bare `{ $ref: "X" }` schemas.
  */
 export function extractTypeAliases(declaration: string): Record<string, string> {
 	const aliases: Record<string, string> = {}
+
+	const stripComments = (s: string) =>
+		s.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+
+	// Match `type X = ...`
 	const typePattern = /\btype\s+(\w+)\s*=\s*/g
 	let match: RegExpExecArray | null
 
@@ -129,7 +139,8 @@ export function extractTypeAliases(declaration: string): Record<string, string> 
 		const name = match[1]
 		const startIdx = match.index + match[0].length
 
-		// If the type body starts with `{`, scan for the matching `}`
+		// Fast path: object-body aliases use balanced `{}` scanning to avoid
+		// stopping at `;` inside the object literal.
 		if (declaration[startIdx] === '{') {
 			let depth = 0
 			let end = startIdx
@@ -143,36 +154,388 @@ export function extractTypeAliases(declaration: string): Record<string, string> 
 					}
 				}
 			}
-			aliases[name] = declaration
-				.slice(startIdx, end)
-				// Strip single-line comments that would break TypeBox parsing
-				.replace(/\/\/[^\n]*/g, '')
-				// Strip multi-line comments
-				.replace(/\/\*[\s\S]*?\*\//g, '')
+			aliases[name] = stripComments(declaration.slice(startIdx, end))
+			continue
 		}
+
+		// Non-object bodies (e.g. `Record<string, number>`, `Foo | Bar`): scan
+		// to the top-level `;` while tracking generic/array/paren/brace depth.
+		let depth = 0
+		let end = startIdx
+		for (; end < declaration.length; end++) {
+			const c = declaration[end]
+			if (c === '{' || c === '[' || c === '<' || c === '(') depth++
+			else if (c === '}' || c === ']' || c === '>' || c === ')') {
+				if (depth === 0) break
+				depth--
+			} else if ((c === ';' || c === '\n') && depth === 0) break
+		}
+
+		const body = stripComments(declaration.slice(startIdx, end)).trim()
+		// Skip `typeof X` aliases. TypeBox can't resolve them, and they
+		// tend to match too broadly (e.g. `type App = typeof app`).
+		if (body && !/^typeof\b/.test(body)) aliases[name] = body
+	}
+
+	// Match `interface X ... { ... }` (with optional generics + extends clause)
+	const interfacePattern = /\binterface\s+(\w+)\b/g
+
+	while ((match = interfacePattern.exec(declaration)) !== null) {
+		const name = match[1]
+		// Don't overwrite an existing alias of the same name; the type
+		// alias body already won.
+		if (aliases[name]) continue
+
+		// Walk forward to the opening `{` of the body, skipping generics
+		// and any `extends ...` clause. Any `{` we hit before that is a
+		// generic-default object literal, so track depth accordingly.
+		let i = match.index + match[0].length
+		let genericDepth = 0
+		let bodyStart = -1
+		for (; i < declaration.length; i++) {
+			const c = declaration[i]
+			if (c === '<') genericDepth++
+			else if (c === '>') genericDepth--
+			else if (c === '{' && genericDepth === 0) {
+				bodyStart = i
+				break
+			}
+		}
+		if (bodyStart === -1) continue
+
+		let depth = 0
+		let end = bodyStart
+		for (; end < declaration.length; end++) {
+			if (declaration[end] === '{') depth++
+			else if (declaration[end] === '}') {
+				depth--
+				if (depth === 0) {
+					end++
+					break
+				}
+			}
+		}
+
+		aliases[name] = stripComments(declaration.slice(bodyStart, end))
 	}
 
 	return aliases
 }
 
 /**
+ * Web API globals (`Response`, `File`, `Blob`, `FormData`, `ReadableStream`)
+ * cannot be inlined as JSON Schema. Replace any `{ $ref: "<global>" }`
+ * leftover from TypeBox with an OpenAPI-friendly equivalent so Scalar
+ * can render the operation instead of showing an empty panel.
+ *
+ * Routes that genuinely return a streaming or binary `Response` map to
+ * an opaque schema (`{}`) and routes that accept a `File` map to a
+ * binary string. Same shape OpenAPI uses for binary uploads.
+ */
+const WEB_API_GLOBAL_SCHEMAS: Record<string, Record<string, unknown>> = {
+	Response: {},
+	ReadableStream: {},
+	File: { type: 'string', format: 'binary' },
+	Blob: { type: 'string', format: 'binary' },
+	FormData: { type: 'object' }
+}
+
+export function transformWebApiGlobals(schema: any): any {
+	if (!schema || typeof schema !== 'object') return schema
+	if (Array.isArray(schema)) return schema.map(transformWebApiGlobals)
+
+	if (typeof schema.$ref === 'string' && schema.$ref in WEB_API_GLOBAL_SCHEMAS) {
+		return { ...WEB_API_GLOBAL_SCHEMAS[schema.$ref] }
+	}
+
+	const out: any = { ...schema }
+	if (schema.properties && typeof schema.properties === 'object') {
+		out.properties = Object.fromEntries(
+			Object.entries(schema.properties).map(([k, v]) => [
+				k,
+				transformWebApiGlobals(v)
+			])
+		)
+	}
+	if (schema.items) out.items = transformWebApiGlobals(schema.items)
+	if (
+		schema.additionalProperties &&
+		typeof schema.additionalProperties === 'object'
+	) {
+		out.additionalProperties = transformWebApiGlobals(
+			schema.additionalProperties
+		)
+	}
+	for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+		if (Array.isArray(schema[key])) {
+			out[key] = schema[key].map(transformWebApiGlobals)
+		}
+	}
+	return out
+}
+
+/**
  * Replace type references with their inlined definitions so that
  * TypeBox can produce concrete schemas instead of unresolvable $refs
  */
+/**
+ * @sinclair/typemap emits `{ type: 'Date' }` for TypeScript `Date` types,
+ * which is invalid OpenAPI. Rewrite those nodes to the standard
+ * `{ type: 'string', format: 'date-time' }` form.
+ */
+export function transformDateTypes(schema: any): any {
+	if (!schema || typeof schema !== 'object') return schema
+	if (Array.isArray(schema)) return schema.map(transformDateTypes)
+
+	if (schema.type === 'Date') {
+		return { type: 'string', format: 'date-time' }
+	}
+
+	const out: any = { ...schema }
+	if (schema.properties && typeof schema.properties === 'object') {
+		out.properties = Object.fromEntries(
+			Object.entries(schema.properties).map(([k, v]) => [
+				k,
+				transformDateTypes(v)
+			])
+		)
+	}
+	if (schema.items) out.items = transformDateTypes(schema.items)
+	if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+		out.additionalProperties = transformDateTypes(schema.additionalProperties)
+	}
+	for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+		if (Array.isArray(schema[key])) {
+			out[key] = schema[key].map(transformDateTypes)
+		}
+	}
+	return out
+}
+
 export function inlineTypeReferences(
 	code: string,
 	aliases: Record<string, string>
 ): string {
 	// Sort by name length descending to avoid partial replacements
 	const names = Object.keys(aliases).sort((a, b) => b.length - a.length)
-	for (const name of names) {
-		// Replace standalone type references (not part of another identifier)
-		code = code.replace(
-			new RegExp(`\\b${name}\\b`, 'g'),
-			aliases[name]
-		)
+	// Iterate until stable so aliases that reference other aliases are
+	// fully inlined. Cap rounds to avoid infinite loops on self-refs.
+	for (let round = 0; round < 5; round++) {
+		let changed = false
+		for (const name of names) {
+			const body = aliases[name]
+			// Skip if the replacement body would reintroduce the name.
+			// Keeps us from flipping back and forth on self-referential aliases.
+			if (new RegExp(`\\b${name}\\b`).test(body)) continue
+			const re = new RegExp(`\\b${name}\\b`, 'g')
+			if (!re.test(code)) continue
+			const next = code.replace(re, body)
+			if (next !== code) {
+				code = next
+				changed = true
+			}
+		}
+		if (!changed) break
 	}
 	return code
+}
+
+// Built-in / lowercase type names that TypeBox handles natively.
+// Bare identifiers NOT in this set and NOT in typeAliases are assumed
+// unresolvable and get stripped from unions.
+const BUILTIN_TYPES = new Set([
+	'string',
+	'number',
+	'boolean',
+	'null',
+	'undefined',
+	'unknown',
+	'any',
+	'void',
+	'never',
+	'object',
+	'Date',
+	'Record',
+	'Array',
+	'Promise',
+	'Partial',
+	'Required',
+	'Pick',
+	'Omit',
+	'Readonly',
+	'ReturnType',
+	'Awaited',
+	'NonNullable',
+	'Exclude',
+	'Extract',
+	'JSX'
+])
+
+/**
+ * When a union contains a bare identifier that can't be resolved
+ * (not in typeAliases, not a builtin, not a generic param), drop it.
+ * This lets TypeBox emit a schema for the remaining members instead
+ * of failing on the whole response.
+ *
+ * Example: `ResponseMapStringStringData | { key: null }` where
+ * `ResponseMapStringStringData` wasn't inlined becomes `{ key: null }`.
+ */
+export function stripUnresolvedUnionMembers(
+	code: string,
+	typeAliases: Record<string, string>
+): string {
+	const isResolvable = (member: string): boolean => {
+		const trimmed = member.trim()
+		// Literal shapes, arrays, tuples, quoted strings, numbers, booleans are fine
+		if (!/^[A-Za-z_]/.test(trimmed)) return true
+		// Strip generic args / array suffix / indexers for the name check
+		const name = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1]
+		if (!name) return true
+		if (BUILTIN_TYPES.has(name)) return true
+		if (typeAliases[name]) return true
+		// Lowercase first letter -> likely a value, param, or primitive-like
+		if (name[0] === name[0].toLowerCase()) return true
+		return false
+	}
+
+	// Split a union at top level (depth 0 for {}, [], <>, ())
+	const splitUnion = (text: string): string[] => {
+		const parts: string[] = []
+		let depth = 0
+		let start = 0
+		for (let i = 0; i < text.length; i++) {
+			const c = text[i]
+			if (c === '{' || c === '[' || c === '<' || c === '(') depth++
+			else if (c === '}' || c === ']' || c === '>' || c === ')') depth--
+			else if (c === '|' && depth === 0) {
+				parts.push(text.slice(start, i))
+				start = i + 1
+			}
+		}
+		parts.push(text.slice(start))
+		return parts
+	}
+
+	// Only process the `response:` value bodies. Walk the string, find
+	// each `response:` key, capture its value up to the matching closer,
+	// rewrite union members inside, and splice back.
+	const RESPONSE_RE = /\bresponse\s*:\s*/g
+	let out = ''
+	let cursor = 0
+	let match: RegExpExecArray | null
+	while ((match = RESPONSE_RE.exec(code)) !== null) {
+		const valueStart = match.index + match[0].length
+		// Find value end: stop at top-level `;` or `,` or `}`
+		let depth = 0
+		let valueEnd = valueStart
+		for (let i = valueStart; i < code.length; i++) {
+			const c = code[i]
+			if (c === '{' || c === '[' || c === '<' || c === '(') depth++
+			else if (c === '}' || c === ']' || c === '>' || c === ')') {
+				if (depth === 0) {
+					valueEnd = i
+					break
+				}
+				depth--
+			} else if ((c === ';' || c === ',') && depth === 0) {
+				valueEnd = i
+				break
+			}
+		}
+
+		const value = code.slice(valueStart, valueEnd)
+		// Inside the response value is { 200: X; 422: Y; ... }. Rewrite the
+		// X / Y type expressions. Simplest: split by `|` at top level and
+		// drop unresolvable members.
+		const rewritten = value.replace(
+			/(\d+\s*:\s*)([^;]+?)(?=\s*[;}])/g,
+			(_, prefix: string, typeExpr: string) => {
+				const members = splitUnion(typeExpr)
+				const kept = members.filter(isResolvable)
+				if (kept.length === 0 || kept.length === members.length) {
+					return prefix + typeExpr
+				}
+				return prefix + kept.join(' | ')
+			}
+		)
+
+		out += code.slice(cursor, valueStart) + rewritten
+		cursor = valueEnd
+	}
+	out += code.slice(cursor)
+	return out
+}
+
+/**
+ * Rewrite object literals whose only member is an index signature
+ * `{ [k: string]: T }` into `Record<string, T>`. TypeBox's syntax
+ * parser emits `never` for raw index signatures, which cascades up
+ * the tree and causes the whole route to be dropped. Only pure
+ * index-only bodies are rewritten; objects with extra properties
+ * are left alone.
+ */
+export function rewriteIndexSignatures(code: string): string {
+	// Scan for `{` openings, then check whether the body is solely an
+	// index signature. We walk the string and substitute in place.
+	let out = ''
+	let i = 0
+	while (i < code.length) {
+		if (code[i] !== '{') {
+			out += code[i]
+			i++
+			continue
+		}
+		// Find the matching `}`
+		let depth = 0
+		let end = i
+		for (; end < code.length; end++) {
+			if (code[end] === '{') depth++
+			else if (code[end] === '}') {
+				depth--
+				if (depth === 0) {
+					end++
+					break
+				}
+			}
+		}
+		const body = code.slice(i + 1, end - 1)
+		// Match `[name: KEY]: VALUE` where VALUE may contain balanced
+		// braces/brackets/angles/parens (for things like `Array<...>` or
+		// nested `{ ... }`). Trailing `;` / `,` optional.
+		const idxMatch = body.match(
+			/^\s*\[\s*\w+\s*:\s*([^\]]+?)\s*\]\s*:\s*/
+		)
+		if (!idxMatch) {
+			out += '{'
+			i++
+			continue
+		}
+		// Capture the value expression with depth-tracking
+		const valueStart = idxMatch[0].length
+		let vDepth = 0
+		let vEnd = valueStart
+		for (; vEnd < body.length; vEnd++) {
+			const c = body[vEnd]
+			if (c === '{' || c === '[' || c === '<' || c === '(') vDepth++
+			else if (c === '}' || c === ']' || c === '>' || c === ')') {
+				if (vDepth === 0) break
+				vDepth--
+			} else if ((c === ';' || c === ',') && vDepth === 0) break
+		}
+		const value = body.slice(valueStart, vEnd).trim()
+		// Ensure nothing else follows besides whitespace / trailing punct
+		const rest = body.slice(vEnd).replace(/^[;,\s]+/, '').trim()
+		if (rest.length > 0) {
+			out += '{'
+			i++
+			continue
+		}
+		// Recursively rewrite inside the value
+		const rewrittenValue = rewriteIndexSignatures(value)
+		out += `Record<string, ${rewrittenValue}>`
+		i = end
+	}
+	return out
 }
 
 /**
@@ -239,7 +602,7 @@ export function resolveImportedTypes(
 		}
 	}
 
-	for (const [modulePath, typeNames] of imports) {
+	for (const [modulePath] of imports) {
 		let resolvedFile: string | undefined
 
 		// Use TypeScript's module resolution (handles paths, exports, monorepos)
@@ -265,10 +628,15 @@ export function resolveImportedTypes(
 			const source = fs.readFileSync(resolvedFile, 'utf8')
 			const moduleAliases = extractTypeAliases(source)
 
-			for (const typeName of typeNames) {
-				if (moduleAliases[typeName]) {
-					aliases[typeName] = moduleAliases[typeName]
-				}
+			// Pull every alias from the resolved module, not just the
+			// requested typeNames. The requested names often reference
+			// other aliases declared in the same file (e.g. a
+			// `ResponseFoo` interface whose body references
+			// `ResponseFooData`); without those, inlineTypeReferences
+			// stops one level deep and TypeBox emits bare $ref schemas
+			// for the nested identifiers.
+			for (const [name, body] of Object.entries(moduleAliases)) {
+				if (!aliases[name]) aliases[name] = body
 			}
 		} catch {
 			// Skip unreadable files
@@ -290,25 +658,44 @@ export function resolveImportedTypes(
  * This way `extractRootObjects` and TypeBox can process each route individually.
  */
 export function flattenNestedIntersections(declaration: string): string {
-	// Repeatedly flatten until no nested intersections remain
+	// Repeatedly flatten until no nested intersections remain.
+	// Deduplicate after each round: when sibling properties each contain
+	// intersections, naive distribution cross-products them and generates
+	// many copies of the same leaf route. Without dedup, real BFFs with
+	// dozens of routes can blow up to tens of thousands of duplicate
+	// top-level terms, sending the inlining + TypeBox pass into a
+	// minutes-long loop. Dedup keeps the output linear in the number of
+	// distinct routes.
+	//
+	// Hard caps (round count, total output size) prevent runaway memory
+	// growth on adversarial nesting where every leaf is unique. If the
+	// cap trips, fall back to the pre-round result. Real apps stabilize
+	// after a few rounds well below these limits.
+	const MAX_ROUNDS = 50
+	const MAX_OUTPUT_LENGTH = 8 * 1024 * 1024
 	let result = declaration
 	let changed = true
+	let rounds = 0
 
-	while (changed) {
+	while (changed && rounds++ < MAX_ROUNDS) {
 		changed = false
-		// Find a `key: { ... } & { ... }` pattern where the `& {` is inside
-		// a property value (not at the top level between root objects).
-		// We scan for `} & {` and check if it's nested inside a property.
 		const parts = splitAtTopLevelIntersections(result)
 		const flattened: string[] = []
+		const seen = new Set<string>()
 
 		for (const part of parts) {
 			const expanded = expandOneLevel(part)
 			if (expanded.length > 1) changed = true
-			flattened.push(...expanded)
+			for (const item of expanded) {
+				if (seen.has(item)) continue
+				seen.add(item)
+				flattened.push(item)
+			}
 		}
 
-		result = flattened.join(' & ')
+		const next = flattened.join(' & ')
+		if (next.length > MAX_OUTPUT_LENGTH) break
+		result = next
 	}
 
 	return result
@@ -432,10 +819,17 @@ export function declarationToJSONSchema(
 	// root object represents a single route path
 	const flattened = flattenNestedIntersections(declaration)
 
-	// Treaty is a collection of { ... } & { ... } & { ... }
-	for (const route of extractRootObjects(
-		flattened.replace(numberKey, '"$1":')
-	)) {
+	// Treaty is a collection of { ... } & { ... } & { ... }.
+	// Even after intersection dedup, extractRootObjects can produce many
+	// identical candidate strings when sibling routes share enough
+	// structure that distribution generates the same leaf shape multiple
+	// times. Deduplicating at this layer turns a per-route inline +
+	// TypeBox loop that runs thousands of times into one that runs once
+	// per distinct route body.
+	const candidates = Array.from(
+		new Set(extractRootObjects(flattened.replace(numberKey, '"$1":')))
+	)
+	for (const route of candidates) {
 		let processed = route.replaceAll(/readonly/g, '')
 
 		// Replace import("...").TypeName with just TypeName
@@ -448,7 +842,40 @@ export function declarationToJSONSchema(
 		// Inline any type aliases so TypeBox resolves them
 		if (typeAliases) processed = inlineTypeReferences(processed, typeAliases)
 
+		// Normalize `undefined` to `null` in response types. JSON has no
+		// undefined; `null` is the correct wire representation. This lets
+		// handlers that return `x ?? undefined` or `field?: T` surface as
+		// nullable schemas instead of being dropped by TypeBox.
+		processed = processed.replace(/\s*\|\s*undefined\b/g, ' | null')
+		processed = processed.replace(/\bundefined\s*\|\s*/g, 'null | ')
+		processed = processed.replace(/:\s*undefined\b/g, ': null')
+
+		// Strip unresolvable named type members from unions.
+		// When a union contains an identifier that couldn't be inlined
+		// (e.g. a type from a third-party package the generator couldn't
+		// resolve), drop that member so TypeBox can still emit a schema
+		// for the remaining literal members.
+		processed = stripUnresolvedUnionMembers(processed, typeAliases ?? {})
+
+		// Rewrite pure index signatures `{ [k: string]: T }` to
+		// `Record<string, T>` which TypeBox handles. The index key may be
+		// `string`, `number`, or a template literal; without this, TypeBox
+		// emits `never` for the whole object and drops the route.
+		processed = rewriteIndexSignatures(processed)
+
+		// TypeBox can't evaluate `ReturnType<typeof fn>` or bare `typeof fn`
+		// (the function body isn't in the type-only declaration). Replace
+		// with `unknown` so the surrounding schema still resolves rather
+		// than dropping the route entirely.
+		processed = processed.replace(
+			/\bReturnType\s*<\s*typeof\s+\w+\s*>/g,
+			'unknown'
+		)
+		processed = processed.replace(/\btypeof\s+\w+/g, 'unknown')
+
 		let schema = TypeBox(processed)
+		schema = transformDateTypes(schema)
+		schema = transformWebApiGlobals(schema)
 		if (schema.type !== 'object') continue
 
 		const paths = []
@@ -658,10 +1085,15 @@ export const fromTypes =
 	"moduleResolution": "bundler",
 	"skipLibCheck": true,
 	"skipDefaultLibCheck": true,
-	"outDir": "${distDir}"
+	"rootDir": "${projectRoot}",
+	"outDir": "${distDir}",
+	"composite": false,
+	"incremental": false,
+	"tsBuildInfoFile": null
 }`
 	},
-	"include": ["${src}"]
+	"include": ["${src}"],
+	"exclude": ["**/node_modules"]
 }`
 				)
 
@@ -676,7 +1108,18 @@ export const fromTypes =
 						'[@elysiajs/openapi/gen] `fromTypes` declaration generation require child_process.spawnSync which is not available in this environment'
 					)
 
-				spawnSync(`tsc`, {
+				// Resolve `tsc` from the user's local node_modules/.bin so
+				// this works in Bun test / Node environments where PATH may
+				// not include the local bin dir. Fall back to `tsc` on PATH.
+				const localTsc = join(
+					projectRoot,
+					'node_modules',
+					'.bin',
+					process.platform === 'win32' ? 'tsc.cmd' : 'tsc'
+				)
+				const tscBin = fs.existsSync(localTsc) ? localTsc : 'tsc'
+
+				spawnSync(tscBin, {
 					shell: true,
 					cwd: tmpRoot,
 					stdio: silent ? undefined : 'inherit'

@@ -1,8 +1,24 @@
 import { TypeBox } from '@sinclair/typemap'
+import { Type, type TSchema } from '@sinclair/typebox'
+import type ts from 'typescript'
+import { getTypeScript } from './typescript'
 import type { AdditionalReference } from '../types'
-
-const matchRoute = /: Elysia<(.*)>/gs
-const numberKey = /(^|[{;,\s])(\d+):/g
+import {
+	extractTypeAliases,
+	inlineTypeReferences,
+	resolveImportedTypes
+} from './type-references'
+export {
+	extractTypeAliases,
+	inlineTypeReferences,
+	resolveImportedTypes
+} from './type-references'
+import {
+	extractRouteDeclarations,
+	normalizeGeneratedSchema,
+	prepareTypeForParser
+} from './route-declarations'
+export { flattenNestedIntersections } from './route-declarations'
 
 export interface OpenAPIGeneratorOptions {
 	/**
@@ -115,420 +131,164 @@ export function extractRootObjects(code: string) {
 	return results
 }
 
-/**
- * Extract type alias definitions from a declaration string and return
- * a map of name -> body (e.g. `User` -> `{ id: string; name: string; }`)
- */
-export function extractTypeAliases(declaration: string): Record<string, string> {
-	const aliases: Record<string, string> = {}
-	const typePattern = /\btype\s+(\w+)\s*=\s*/g
-	let match: RegExpExecArray | null
-
-	while ((match = typePattern.exec(declaration)) !== null) {
-		const name = match[1]
-		const startIdx = match.index + match[0].length
-
-		// If the type body starts with `{`, scan for the matching `}`
-		if (declaration[startIdx] === '{') {
-			let depth = 0
-			let end = startIdx
-			for (; end < declaration.length; end++) {
-				if (declaration[end] === '{') depth++
-				else if (declaration[end] === '}') {
-					depth--
-					if (depth === 0) {
-						end++
-						break
-					}
-				}
-			}
-			aliases[name] = declaration
-				.slice(startIdx, end)
-				// Strip single-line comments that would break TypeBox parsing
-				.replace(/\/\/[^\n]*/g, '')
-				// Strip multi-line comments
-				.replace(/\/\*[\s\S]*?\*\//g, '')
-		}
+function metadataProperties(
+	schema: TSchema
+): Record<string, TSchema> | undefined {
+	if (schema.properties) return { ...schema.properties }
+	if (!Array.isArray(schema.allOf)) return
+	const properties: Record<string, TSchema> = Object.create(null)
+	for (const member of schema.allOf) {
+		const fields = metadataProperties(member)
+		if (!fields) return
+		for (const [key, value] of Object.entries(fields))
+			properties[key] = properties[key]
+				? Type.Intersect([properties[key], value])
+				: value
 	}
-
-	return aliases
-}
-
-/**
- * Replace type references with their inlined definitions so that
- * TypeBox can produce concrete schemas instead of unresolvable $refs
- */
-export function inlineTypeReferences(
-	code: string,
-	aliases: Record<string, string>
-): string {
-	// Sort by name length descending to avoid partial replacements
-	const names = Object.keys(aliases).sort((a, b) => b.length - a.length)
-	for (const name of names) {
-		// Replace standalone type references (not part of another identifier)
-		code = code.replace(
-			new RegExp(`\\b${name}\\b`, 'g'),
-			aliases[name]
-		)
-	}
-	return code
-}
-
-/**
- * Scan a declaration for `import("...").TypeName` references,
- * use TypeScript's module resolution to find the source files,
- * and extract the type aliases from them.
- *
- * This allows TypeBox to produce concrete schemas for cross-module types
- * (e.g. Drizzle ORM types imported from another package).
- */
-export function resolveImportedTypes(
-	declaration: string,
-	projectRoot: string,
-	tsconfigPath: string,
-	sourceFilePath: string,
-	existingAliases: Record<string, string>,
-	fs: {
-		existsSync: (path: string) => boolean
-		readFileSync: (path: string, encoding: BufferEncoding) => string
-	}
-): Record<string, string> {
-	const aliases = { ...existingAliases }
-
-	// Collect all import("...").TypeName references
-	const importPattern = /import\("([^"]+)"\)\.(\w+)/g
-	const imports = new Map<string, Set<string>>()
-	let match: RegExpExecArray | null
-
-	while ((match = importPattern.exec(declaration)) !== null) {
-		const [, modulePath, typeName] = match
-		if (aliases[typeName]) continue // already resolved
-		if (!imports.has(modulePath)) imports.set(modulePath, new Set())
-		imports.get(modulePath)!.add(typeName)
-	}
-
-	if (imports.size === 0) return aliases
-
-	let ts: typeof import('typescript')
-	try {
-		ts = require('typescript')
-	} catch {
-		throw new Error(
-			'@elysiajs/openapi: typescript is required to resolve import() type references. ' +
-			'Install it with: bun add -d typescript'
-		)
-	}
-
-	let compilerOptions: Record<string, any> = {}
-	const fullTsconfigPath = tsconfigPath.startsWith('/')
-		? tsconfigPath
-		: join(projectRoot, tsconfigPath)
-
-	if (fs.existsSync(fullTsconfigPath)) {
-		const configFile = ts.readConfigFile(fullTsconfigPath, (path) =>
-			fs.readFileSync(path, 'utf8')
-		)
-		if (configFile.config) {
-			const parsed = ts.parseJsonConfigFileContent(
-				configFile.config,
-				ts.sys,
-				projectRoot
-			)
-			compilerOptions = parsed.options
-		}
-	}
-
-	for (const [modulePath, typeNames] of imports) {
-		let resolvedFile: string | undefined
-
-		// Use TypeScript's module resolution (handles paths, exports, monorepos)
-		// Resolve relative to the source file so workspace package symlinks work
-		const containingFile = sourceFilePath.startsWith('/')
-			? sourceFilePath
-			: join(projectRoot, sourceFilePath)
-		const resolved = ts.resolveModuleName(
-			modulePath,
-			containingFile,
-			compilerOptions,
-			ts.sys
-		)
-		const fileName =
-			resolved.resolvedModule?.resolvedFileName
-		if (fileName && fs.existsSync(fileName)) {
-			resolvedFile = fileName
-		}
-
-		if (!resolvedFile) continue
-
-		try {
-			const source = fs.readFileSync(resolvedFile, 'utf8')
-			const moduleAliases = extractTypeAliases(source)
-
-			for (const typeName of typeNames) {
-				if (moduleAliases[typeName]) {
-					aliases[typeName] = moduleAliases[typeName]
-				}
-			}
-		} catch {
-			// Skip unreadable files
-		}
-	}
-
-	return aliases
-}
-
-/**
- * Flatten nested intersections so that each root object represents a single route.
- *
- * Multi-route Elysia plugins produce declarations like:
- *   { api: { v3: { a: {...} } & { b: {...} } } }
- *
- * This distributes the outer structure over the inner intersection:
- *   { api: { v3: { a: {...} } } } & { api: { v3: { b: {...} } } }
- *
- * This way `extractRootObjects` and TypeBox can process each route individually.
- */
-export function flattenNestedIntersections(declaration: string): string {
-	// Repeatedly flatten until no nested intersections remain
-	let result = declaration
-	let changed = true
-
-	while (changed) {
-		changed = false
-		// Find a `key: { ... } & { ... }` pattern where the `& {` is inside
-		// a property value (not at the top level between root objects).
-		// We scan for `} & {` and check if it's nested inside a property.
-		const parts = splitAtTopLevelIntersections(result)
-		const flattened: string[] = []
-
-		for (const part of parts) {
-			const expanded = expandOneLevel(part)
-			if (expanded.length > 1) changed = true
-			flattened.push(...expanded)
-		}
-
-		result = flattened.join(' & ')
-	}
-
-	return result
-}
-
-/**
- * Split a declaration string at top-level `& ` boundaries (brace-aware).
- */
-function splitAtTopLevelIntersections(decl: string): string[] {
-	const parts: string[] = []
-	let depth = 0
-	let start = 0
-
-	for (let i = 0; i < decl.length; i++) {
-		const ch = decl[i]
-		if (ch === '{') depth++
-		else if (ch === '}') depth--
-		else if (depth === 0 && ch === '&') {
-			parts.push(decl.slice(start, i).trim())
-			start = i + 1
-		}
-	}
-
-	const last = decl.slice(start).trim()
-	if (last) parts.push(last)
-	return parts.filter(Boolean)
-}
-
-/**
- * Given a single object string like `{ api: { v3: { a: 1 } & { b: 2 }; }; }`,
- * find the deepest nested intersection and distribute the parent over it.
- * Returns multiple strings if an intersection was found, or the original string if not.
- */
-function expandOneLevel(obj: string): string[] {
-	// Find `} & {` at the deepest nesting level
-	let bestIdx = -1
-	let bestDepth = -1
-	let depth = 0
-
-	for (let i = 0; i < obj.length - 4; i++) {
-		const ch = obj[i]
-		if (ch === '{') depth++
-		else if (ch === '}') {
-			depth--
-			// Check for `} & {` pattern
-			const rest = obj.slice(i)
-			const m = rest.match(/^\}\s*&\s*\{/)
-			if (m && depth > bestDepth) {
-				bestIdx = i
-				bestDepth = depth
-			}
-		}
-	}
-
-	if (bestIdx === -1) return [obj]
-
-	// Find the enclosing property — walk backwards from the `} & {` to find
-	// the opening `{` at the same depth that starts this intersection group.
-	// Then walk forward to find all `& {` members.
-
-	// Find the start of the intersection group: the `{` that opened the first member.
-	// We start from `bestIdx` (the `}` in `} & {`). That `}` closes the first member,
-	// so depth starts at 1 (we're "inside" one closing brace) and we look for
-	// the `{` that brings depth back to 0.
-	let groupStart = -1
-	depth = 1
-	for (let i = bestIdx - 1; i >= 0; i--) {
-		if (obj[i] === '}') depth++
-		else if (obj[i] === '{') {
-			depth--
-			if (depth === 0) {
-				groupStart = i
-				break
-			}
-		}
-	}
-
-	if (groupStart === -1) return [obj]
-
-	// Find the end of the intersection group: scan forward from groupStart
-	// collecting all `{ ... } & { ... } & { ... }` members
-	const members: string[] = []
-	let pos = groupStart
-	while (pos < obj.length) {
-		if (obj[pos] !== '{') break
-		// Find matching close brace
-		depth = 0
-		let end = pos
-		for (; end < obj.length; end++) {
-			if (obj[end] === '{') depth++
-			else if (obj[end] === '}') {
-				depth--
-				if (depth === 0) { end++; break }
-			}
-		}
-		members.push(obj.slice(pos, end))
-		pos = end
-		// Skip ` & ` separator
-		const sep = obj.slice(pos).match(/^\s*&\s*/)
-		if (sep) pos += sep[0].length
-		else break
-	}
-
-	if (members.length <= 1) return [obj]
-
-	// The prefix is everything before groupStart, suffix is everything after the group
-	const prefix = obj.slice(0, groupStart)
-	const suffix = obj.slice(pos)
-
-	// Distribute: for each member, wrap with prefix + suffix
-	return members.map((member) => prefix + member + suffix)
+	return properties
 }
 
 export function declarationToJSONSchema(
 	declaration: string,
-	typeAliases?: Record<string, string>
+	typeAliases?: Record<string, string>,
+	{ silent = false }: Pick<OpenAPIGeneratorOptions, 'silent'> = {}
 ) {
 	const routes: AdditionalReference = {}
-
-	// Flatten nested intersections (from multi-route plugins) so each
-	// root object represents a single route path
-	const flattened = flattenNestedIntersections(declaration)
-
-	// Treaty is a collection of { ... } & { ... } & { ... }
-	for (const route of extractRootObjects(
-		declaration.replace(numberKey, '$1"$2":')
-	)) {
-		let processed = route.replaceAll(/readonly/g, '')
-
-		// Replace import("...").TypeName with just TypeName
-		// (the type should already be in typeAliases from resolveImportedTypes)
-		processed = processed.replace(
-			/import\([^)]*\)\.(\w+)/g,
-			'$1'
-		)
-
-		// Inline any type aliases so TypeBox resolves them
-		if (typeAliases) processed = inlineTypeReferences(processed, typeAliases)
-
-		let schema = TypeBox(processed)
-		if (schema.type !== 'object') continue
-
-		const paths = []
-
-		while (true) {
-			const keys = Object.keys(schema.properties)
-			if (keys.length !== 1) break
-
-			paths.push(keys[0])
-
-			schema = schema.properties[keys[0]] as any
-			if (!schema?.properties) break
-		}
-
-		const method = paths.pop()!
-		// For whatever reason, if failed to infer route correctly
-		if (!method) continue
-
-		const path = '/' + paths.join('/')
-		schema = schema.properties
-
-		if (schema?.response?.type === 'object') {
-			const responseSchema: Record<string, any> = {}
-
-			for (const key in schema.response.properties)
-				responseSchema[key] = schema.response.properties[key]
-
-			schema.response = responseSchema
-		}
-
-		if (!routes[path]) routes[path] = {}
-		// @ts-ignore
-		routes[path][method.toLowerCase()] = schema
+	const unresolved = new Set<string>()
+	const onUnresolved = (name: string) => {
+		unresolved.add(name)
 	}
 
+	for (const route of extractRouteDeclarations(declaration)) {
+		let processed = route.type
+		processed = inlineTypeReferences(
+			processed,
+			typeAliases ?? {},
+			onUnresolved
+		)
+
+		const schema = TypeBox(prepareTypeForParser(processed, onUnresolved))
+		normalizeGeneratedSchema(schema, onUnresolved)
+		const properties = metadataProperties(schema)
+		if (!properties) {
+			onUnresolved(
+				`${route.method.toUpperCase()} /${route.path.join('/')}: unsupported route declaration`
+			)
+			continue
+		}
+		if (properties.response) {
+			const response = metadataProperties(properties.response)
+			if (response) properties.response = response as unknown as TSchema
+		}
+
+		const path = '/' + route.path.join('/')
+		if (!routes[path]) routes[path] = {}
+		// @ts-ignore
+		routes[path][route.method] = properties
+	}
+
+	if (unresolved.size && !silent) {
+		const examples = [...unresolved].slice(0, 10).map((name) => {
+			const compact = name.replace(/\s+/g, ' ')
+			return compact.length > 120
+				? compact.slice(0, 117) + '...'
+				: compact
+		})
+		const remaining =
+			unresolved.size > examples.length
+				? `; ${unresolved.size - examples.length} more`
+				: ''
+		console.warn(
+			`[@elysiajs/openapi/gen] Unsupported types or declarations (${unresolved.size}): ${examples.join(', ')}${remaining}. Unresolved fields use unknown schemas.`
+		)
+	}
 	return routes
 }
 
-/**
- * Extract the Nth (0-indexed) top-level generic parameter from
- * a string that starts with `: Elysia<...>` or `Elysia<...>`.
- *
- * Tracks `<>`, `{}`, `[]`, `()` depth so that commas inside
- * nested generics or object literals are not counted as separators.
- */
+/** Extract a generic argument without treating literal text or arrow tokens as delimiters. */
 export function extractGenericParam(
 	instance: string,
 	paramIndex: number
 ): string | undefined {
-	// Find the opening `<` of the Elysia generic
-	const openAngle = instance.indexOf('<')
-	if (openAngle === -1) return undefined
+	const ts = getTypeScript()
+	const source = ts.createSourceFile(
+		'instance.d.ts',
+		`type Instance = ${instance.replace(/^\s*:\s*/, '')}`,
+		ts.ScriptTarget.Latest,
+		true
+	)
+	const statement = source.statements[0]
+	if (!statement || !ts.isTypeAliasDeclaration(statement)) return
+	const type = statement.type
+	if (ts.isTypeReferenceNode(type) || ts.isImportTypeNode(type))
+		return type.typeArguments?.[paramIndex]?.getText(source)
+}
 
-	let depth = 0
-	let currentParam = 0
-	let paramStart = openAngle + 1
-
-	for (let i = openAngle + 1; i < instance.length; i++) {
-		const ch = instance[i]
-
-		if (ch === '<' || ch === '{' || ch === '[' || ch === '(') {
-			depth++
-		} else if (ch === '>' || ch === '}' || ch === ']' || ch === ')') {
-			if (depth === 0) {
-				// We've hit the closing `>` of the Elysia generic
-				if (currentParam === paramIndex) {
-					return instance.slice(paramStart, i).trim()
-				}
-				return undefined // param index out of range
-			}
-			depth--
-		} else if (ch === ',' && depth === 0) {
-			if (currentParam === paramIndex) {
-				return instance.slice(paramStart, i).trim()
-			}
-			currentParam++
-			paramStart = i + 1
+function findRouteSection(
+	declaration: string,
+	instanceName?: string
+): string | undefined {
+	const ts = getTypeScript()
+	const source = ts.createSourceFile(
+		'app.d.ts',
+		declaration,
+		ts.ScriptTarget.Latest,
+		true
+	)
+	const names = new Set(['Elysia'])
+	for (const statement of source.statements) {
+		if (
+			!ts.isImportDeclaration(statement) ||
+			!ts.isStringLiteral(statement.moduleSpecifier) ||
+			statement.moduleSpecifier.text !== 'elysia'
+		)
+			continue
+		const clause = statement.importClause
+		if (clause?.name) names.add(clause.name.text)
+		if (
+			clause?.namedBindings &&
+			ts.isNamespaceImport(clause.namedBindings)
+		) {
+			names.add(`${clause.namedBindings.name.text}.Elysia`)
+			names.add(`${clause.namedBindings.name.text}.default`)
+		}
+		if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings))
+			for (const element of clause.namedBindings.elements)
+				if (
+					['Elysia', 'default'].includes(
+						element.propertyName?.text ?? element.name.text
+					)
+				)
+					names.add(element.name.text)
+	}
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue
+		for (const variable of statement.declarationList.declarations) {
+			if (
+				!ts.isIdentifier(variable.name) ||
+				(instanceName && variable.name.text !== instanceName)
+			)
+				continue
+			const type = variable.type
+			if (
+				type &&
+				ts.isTypeReferenceNode(type) &&
+				names.has(type.typeName.getText(source))
+			)
+				return type.typeArguments?.[4]?.getText(source)
+			if (
+				type &&
+				ts.isImportTypeNode(type) &&
+				ts.isLiteralTypeNode(type.argument) &&
+				ts.isStringLiteral(type.argument.literal) &&
+				type.argument.literal.text === 'elysia' &&
+				['Elysia', 'default'].includes(
+					type.qualifier?.getText(source) ?? ''
+				)
+			)
+				return type.typeArguments?.[4]?.getText(source)
 		}
 	}
-
-	return undefined
 }
 
 /**
@@ -550,7 +310,7 @@ export const fromTypes =
 		{
 			tsconfigPath = 'tsconfig.json',
 			instanceName,
-			projectRoot = process.cwd(),
+			projectRoot = typeof process === 'undefined' ? '' : process.cwd(),
 			overrideOutputPath,
 			debug = false,
 			compilerOptions,
@@ -564,7 +324,9 @@ export const fromTypes =
 			targetFilePath.trimStart().startsWith('{') &&
 			targetFilePath.trimEnd().endsWith('}')
 		)
-			return declarationToJSONSchema(targetFilePath)
+			return declarationToJSONSchema(targetFilePath, undefined, {
+				silent
+			})
 
 		if (
 			typeof process === 'undefined' ||
@@ -587,19 +349,16 @@ export const fromTypes =
 			)
 				throw new Error('Only .ts files are supported')
 
-			if (targetFilePath.startsWith('./'))
-				targetFilePath = targetFilePath.slice(2)
-
-			let src = targetFilePath.startsWith('/')
-				? targetFilePath
-				: join(projectRoot, targetFilePath)
+			const path = process.getBuiltinModule('path')
+			const src = path.resolve(projectRoot, targetFilePath)
 
 			if (!fs.existsSync(src))
 				throw new Error(
 					`Couldn't find "${targetFilePath}" from ${projectRoot}`
 				)
 
-			let targetFile: string
+			let targetFile: string | undefined
+			let resolvedOptions: ts.CompilerOptions | undefined
 
 			if (!tmpRoot) {
 				const os = process.getBuiltinModule('os')
@@ -611,37 +370,19 @@ export const fromTypes =
 					'.ElysiaAutoOpenAPI'
 				)
 			}
+			tmpRoot = path.resolve(tmpRoot)
 
 			// Since it's already a declaration file
 			// We can just read it directly
-			if (targetFilePath.endsWith('.d.ts')) targetFile = targetFilePath
+			if (targetFilePath.endsWith('.d.ts')) targetFile = src
 			else {
 				if (fs.existsSync(tmpRoot))
 					fs.rmSync(tmpRoot, { recursive: true, force: true })
 
 				fs.mkdirSync(tmpRoot, { recursive: true })
 
-				const tsconfig = tsconfigPath.startsWith('/')
-					? tsconfigPath
-					: join(projectRoot, tsconfigPath)
-
-				let extendsRef = fs.existsSync(tsconfig)
-					? `"extends": "${join(projectRoot, 'tsconfig.json')}",`
-					: ''
-
-				let distDir = join(tmpRoot, 'dist')
-				let rootDir = projectRoot
-
-				// Convert Windows path to Unix for TypeScript CLI
-				if (
-					typeof process !== 'undefined' &&
-					process.platform === 'win32'
-				) {
-					extendsRef = extendsRef.replace(/\\/g, '/')
-					src = src.replace(/\\/g, '/')
-					distDir = distDir.replace(/\\/g, '/')
-					rootDir = rootDir.replace(/\\/g, '/')
-				}
+				const tsconfig = path.resolve(projectRoot, tsconfigPath)
+				const distDir = path.join(tmpRoot, 'dist')
 
 				const resolvedCompilerOptions = {
 					lib: ['ESNext'],
@@ -652,101 +393,113 @@ export const fromTypes =
 					moduleResolution: 'bundler',
 					skipLibCheck: true,
 					skipDefaultLibCheck: true,
-					rootDir,
 					outDir: distDir,
 					...compilerOptions
 				}
 
-				fs.writeFileSync(
-					join(tmpRoot, 'tsconfig.json'),
-					`{
-	${extendsRef}
-	"compilerOptions": ${JSON.stringify(resolvedCompilerOptions)},
-	"include": ["${src}"]
-}`
-				)
+				const config = {
+					...(fs.existsSync(tsconfig) ? { extends: tsconfig } : {}),
+					compilerOptions: resolvedCompilerOptions,
+					include: [src]
+				}
+				const configPath = path.join(tmpRoot, 'tsconfig.json')
+				fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
 
-				const child_process = process.getBuiltinModule('child_process')
-				if (!child_process)
-					throw new Error(
-						'[@elysiajs/openapi/gen] `fromTypes` declaration generation require `child_process` module which is not available in this environment'
-					)
-				const { spawnSync } = child_process
-				if (typeof spawnSync !== 'function')
-					throw new Error(
-						'[@elysiajs/openapi/gen] `fromTypes` declaration generation require child_process.spawnSync which is not available in this environment'
-					)
-
-				spawnSync(`tsc`, {
-					shell: true,
-					cwd: tmpRoot,
-					stdio: silent ? undefined : 'inherit'
+				const ts = getTypeScript()
+				const parsed = ts.getParsedCommandLineOfConfigFile(
+					configPath,
+					undefined,
+					{
+						...ts.sys,
+						onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+							throw new Error(
+								ts.flattenDiagnosticMessageText(
+									diagnostic.messageText,
+									'\n'
+								)
+							)
+						}
+					}
+				)!
+				const host = ts.createCompilerHost(parsed.options)
+				resolvedOptions = parsed.options
+				const outputDirectories = [
+					parsed.options.outDir ?? distDir,
+					...(parsed.options.declarationDir
+						? [parsed.options.declarationDir]
+						: [])
+				]
+				const program = ts.createProgram({
+					rootNames: parsed.fileNames,
+					options: parsed.options,
+					host,
+					projectReferences: parsed.projectReferences,
+					configFileParsingDiagnostics: parsed.errors
 				})
-
-				const fileName = targetFilePath
-					.replace(/.tsx$/, '.ts')
-					.replace(/.ts$/, '.d.ts')
+				const result = program.emit(
+					undefined,
+					(fileName, text, bom, onError, sourceFiles, data) => {
+						// TypeScript can emit beside source files outside an explicit rootDir.
+						if (
+							!outputDirectories.some((directory) => {
+								const relative = path.relative(
+									directory,
+									fileName
+								)
+								return (
+									relative !== '..' &&
+									!relative.startsWith(`..${path.sep}`) &&
+									!path.isAbsolute(relative)
+								)
+							})
+						) {
+							onError?.(
+								'Output is outside the configured output directories'
+							)
+							return
+						}
+						host.writeFile(
+							fileName,
+							text,
+							bom,
+							onError,
+							sourceFiles,
+							data
+						)
+						if (
+							fileName.endsWith('.d.ts') &&
+							sourceFiles?.some(
+								(file) => path.resolve(file.fileName) === src
+							)
+						)
+							targetFile = fileName
+					}
+				)
 
 				targetFile =
 					(overrideOutputPath
 						? typeof overrideOutputPath === 'string'
-							? overrideOutputPath.startsWith('/')
-								? overrideOutputPath
-								: join(tmpRoot, 'dist', overrideOutputPath)
+							? path.resolve(distDir, overrideOutputPath)
 							: overrideOutputPath(tmpRoot)
-						: undefined) ??
-					join(
-						tmpRoot,
-						'dist',
-						// remove leading like src or something similar
-						fileName.slice(fileName.indexOf('/') + 1)
-					)
+						: undefined) ?? targetFile
 
-				let existed = fs.existsSync(targetFile)
-
-				if (!existed && !overrideOutputPath) {
-					targetFile = join(
-						tmpRoot,
-						'dist',
-						// use original file name as-is eg. in monorepo
-						fileName
-					)
-
-					existed = fs.existsSync(targetFile)
-				}
-
-				if (!existed) {
-					fs.rmSync(join(tmpRoot, 'tsconfig.json'))
-
-					console.warn(
-						'[@elysiajs/openapi/gen] Failed to generate OpenAPI schema'
-					)
-					console.warn("Couldn't find generated declaration file")
-
-					if (fs.existsSync(join(tmpRoot, 'dist'))) {
-						const tempFiles = fs
-							.readdirSync(join(tmpRoot, 'dist'), {
-								recursive: true
-							})
-							.filter((x) => x.toString().endsWith('.d.ts'))
-							.map((x) => `- ${x}`)
-							.join('\n')
-
-						if (tempFiles) {
-							console.warn(
-								'You can override with `overrideOutputPath` with one of the following:'
-							)
-							console.warn(tempFiles)
-						}
-					} else {
+				if (!silent || !targetFile) {
+					const diagnostics = ts.sortAndDeduplicateDiagnostics([
+						...ts.getPreEmitDiagnostics(program),
+						...result.diagnostics
+					])
+					if (diagnostics.length)
 						console.warn(
-							"reason: root folder doesn't exists",
-							join(tmpRoot, 'dist')
+							ts.formatDiagnostics(diagnostics, {
+								getCanonicalFileName: (file) => file,
+								getCurrentDirectory: () => projectRoot,
+								getNewLine: () => '\n'
+							})
 						)
-					}
-
-					return
 				}
+
+				if (!targetFile || !fs.existsSync(targetFile))
+					throw new Error("Couldn't find generated declaration file")
 			}
 
 			const declaration = fs.readFileSync(targetFile, 'utf8')
@@ -766,25 +519,22 @@ export const fromTypes =
 				tsconfigPath,
 				src,
 				typeAliases,
-				fs
+				fs,
+				resolvedOptions ??
+					(compilerOptions
+						? getTypeScript().convertCompilerOptionsFromJson(
+								compilerOptions,
+								projectRoot
+							).options
+						: undefined)
 			)
 
-			let instance = declaration.match(
-				instanceName
-					? new RegExp(`${instanceName}: Elysia<(.*)`, 'gs')
-					: matchRoute
-			)?.[0]
-
-			if (!instance) return
-
-			// Get 5th generic parameter (the routes map)
-			// Elysia<Prefix, Scoped, Singleton, Definitions, Routes, Metadata, Routes>
-			// The params can be any type (string, `any`, objects, etc.),
-			// so we must parse by counting commas at depth 0 (brace-aware).
-			const routeSection = extractGenericParam(instance, 4)
+			const routeSection = findRouteSection(declaration, instanceName)
 			if (!routeSection) return
 
-			return declarationToJSONSchema(routeSection, typeAliases)
+			return declarationToJSONSchema(routeSection, typeAliases, {
+				silent
+			})
 		} catch (error) {
 			console.warn(
 				'[@elysiajs/openapi/gen] Failed to generate OpenAPI schema'

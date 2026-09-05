@@ -53,6 +53,62 @@ const app = new Elysia()
 
 Then go to `http://localhost:3000/openapi`.
 
+## Type-based references (experimental)
+
+`fromTypes` derives documentation from an exported Elysia instance's TypeScript
+types. It returns a synchronous callback for `references`:
+
+```typescript
+import { Elysia } from 'elysia'
+import { openapi } from '@elysia/openapi'
+import { fromTypes } from '@elysia/openapi/gen'
+
+export const app = new Elysia()
+	.use(
+		openapi({
+			references: fromTypes('src/index.ts', { instanceName: 'app' })
+		})
+	)
+	.get('/users', () => [{ id: '1', name: 'Alice' }])
+```
+
+Install `typescript` in the environment that generates the references. A `.ts` or
+`.tsx` input is compiled to declarations using TypeScript; a prebuilt `.d.ts` is
+read directly. File inputs require Node.js or Bun. You can also pass an
+object-shaped route type literal without compiling a file:
+
+```typescript
+const references = fromTypes(`{
+	users: { get: { response: { 200: { id: string; name: string }[] } } }
+}`)
+```
+
+Relative input paths and `tsconfigPath` resolve from `projectRoot`, which defaults
+to the current working directory. The default input is `src/index.ts`, and the
+default config is `tsconfig.json`. The selected config's relative `extends` and
+path mappings retain their normal TypeScript resolution. Set `instanceName` when
+the file contains multiple Elysia instances.
+
+Generation extends that config with declaration-only output defaults.
+`compilerOptions` overrides those defaults; configured `rootDir`, `declarationDir`
+and `noEmitOnError` are respected. Without an explicit `rootDir`, sibling source
+packages can share TypeScript's inferred source root. Output discovery follows
+TypeScript's emitted files. `overrideOutputPath` can instead select a declaration:
+relative strings resolve under the temporary `dist` directory, absolute strings
+are used directly, and callbacks receive the temporary root.
+
+Imported aliases, re-exports and supported type expressions are resolved through
+TypeScript. Nested route intersections are traversed independently so that all
+paths and methods are retained. `Date` becomes a string with `format: 'date-time'`.
+Types that cannot be resolved or represented, including recursive or unsupported
+type expressions, become `unknown` (an unconstrained schema) with a diagnostic;
+type-derived references do not change runtime validation.
+
+Use `debug: true` to retain the generated config and declarations. A custom
+`tmpRoot` must be a dedicated scratch directory: compilation clears it first,
+and it is normally removed afterward. `silent: true` suppresses routine compiler
+and unresolved-type diagnostics; generation failures can still report errors.
+
 # config
 
 ## enabled

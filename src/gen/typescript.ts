@@ -1,0 +1,1 @@
+export { getTypeScript } from '#typescript'

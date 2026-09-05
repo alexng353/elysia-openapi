@@ -738,7 +738,6 @@ describe('Gen > Type Gen', () => {
 				moduleResolution: 'bundler',
 				skipLibCheck: true,
 				skipDefaultLibCheck: true,
-				rootDir: process.cwd(),
 				outDir: join(tmpRoot, 'dist'),
 				strict: true
 			})
@@ -873,9 +872,9 @@ type Post = { title: string; body: string; };
 		)
 	})
 
-	it('ignores non-object type aliases', () => {
+	it('extracts non-object type aliases', () => {
 		const aliases = extractTypeAliases('type Name = string;')
-		expect(Object.keys(aliases)).toEqual([])
+		expect(aliases).toEqual({ Name: 'string' })
 	})
 })
 

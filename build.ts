@@ -9,7 +9,7 @@ const tsupConfig: Options = {
 	sourcemap: false,
 	clean: true,
 	bundle: true,
-	external: ['typescript', '@sinclair/typebox']
+	external: ['typescript', '@sinclair/typebox', '#typescript']
 } satisfies Options
 
 await Promise.all([

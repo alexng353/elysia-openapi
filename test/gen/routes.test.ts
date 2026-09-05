@@ -203,6 +203,9 @@ describe('Gen > nested route declarations', () => {
 		const declaration = `{ api: ${plugins} }`
 		const flattened = flattenNestedIntersections(declaration)
 		expect(flattened.length).toBeLessThan(declaration.length * 3)
+		expect(declarationToJSONSchema(flattened)).toEqual(
+			declarationToJSONSchema(declaration)
+		)
 		expect(Object.keys(declarationToJSONSchema(declaration))).toHaveLength(
 			10
 		)

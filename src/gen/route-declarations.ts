@@ -171,6 +171,23 @@ export function normalizeGeneratedSchema(
 		// TypeBox consumers use Kind in addition to the JSON Schema type.
 		schema[Symbol.for('TypeBox.Kind')] = 'String'
 	}
+	if (
+		typeof schema.type === 'string' &&
+		![
+			'string',
+			'number',
+			'integer',
+			'boolean',
+			'object',
+			'array',
+			'null'
+		].includes(schema.type)
+	) {
+		onUnresolved(schema.type)
+		for (const key of Reflect.ownKeys(schema)) delete schema[key]
+		schema[Symbol.for('TypeBox.Kind')] = 'Unknown'
+		return
+	}
 	for (const value of Object.values(schema)) {
 		if (value && typeof value === 'object')
 			normalizeGeneratedSchema(value, onUnresolved)
@@ -179,16 +196,13 @@ export function normalizeGeneratedSchema(
 
 const genericTypes = new Set([
 	'Array',
-	'ReadonlyArray',
 	'Record',
 	'Partial',
 	'Required',
-	'Readonly',
 	'Pick',
 	'Omit',
 	'Exclude',
 	'Extract',
-	'NonNullable',
 	'Awaited',
 	'Promise',
 	'Uppercase',
@@ -210,20 +224,76 @@ export function prepareTypeForParser(
 	)
 	const transformed = ts.transform(source, [
 		(context) => {
+			const unknown = (node: ts.Node) => {
+				onUnresolved?.(node.getText(source))
+				return context.factory.createKeywordTypeNode(
+					ts.SyntaxKind.UnknownKeyword
+				)
+			}
+			const unionMembers = (node: ts.TypeNode): ts.TypeNode[] => {
+				if (ts.isParenthesizedTypeNode(node))
+					return unionMembers(node.type)
+				if (ts.isUnionTypeNode(node))
+					return node.types.flatMap(unionMembers)
+				return [node]
+			}
+			const unsupportedKey = (node: ts.Node): boolean =>
+				node.kind === ts.SyntaxKind.NumberKeyword ||
+				ts.isTemplateLiteralTypeNode(node) ||
+				(ts.forEachChild(
+					node,
+					(child) => unsupportedKey(child) || undefined
+				) ??
+					false)
 			const visit: ts.Visitor = (node) => {
+				if (
+					ts.isTypeReferenceNode(node) &&
+					ts.isIdentifier(node.typeName)
+				) {
+					const name = node.typeName.text
+					if (
+						name === 'ReadonlyArray' &&
+						node.typeArguments?.length === 1
+					)
+						return context.factory.createArrayTypeNode(
+							ts.visitNode(
+								node.typeArguments[0],
+								visit
+							) as ts.TypeNode
+						)
+					if (name === 'Readonly' && node.typeArguments?.length === 1)
+						return ts.visitNode(node.typeArguments[0], visit)
+					if (
+						name === 'Record' &&
+						node.typeArguments?.[0] &&
+						unsupportedKey(node.typeArguments[0])
+					)
+						return unknown(node)
+				}
+				if (
+					ts.isFunctionTypeNode(node) ||
+					ts.isTemplateLiteralTypeNode(node) ||
+					(ts.isTupleTypeNode(node) &&
+						node.elements.some(
+							(element) =>
+								ts.isNamedTupleMember(element) ||
+								ts.isRestTypeNode(element) ||
+								ts.isOptionalTypeNode(element)
+						))
+				)
+					return unknown(node)
 				if (ts.isIntersectionTypeNode(node)) {
 					const types = node.types
 						.map((type) => ts.visitNode(type, visit) as ts.TypeNode)
 						.filter(
 							(type) => type.kind !== ts.SyntaxKind.UnknownKeyword
 						)
-					return types.length === 1
-						? types[0]
-						: types.length
-							? context.factory.createIntersectionTypeNode(types)
-							: context.factory.createKeywordTypeNode(
-									ts.SyntaxKind.UnknownKeyword
-								)
+					if (types.length === 1) return types[0]
+					if (types.length)
+						return context.factory.createIntersectionTypeNode(types)
+					return context.factory.createKeywordTypeNode(
+						ts.SyntaxKind.UnknownKeyword
+					)
 				}
 				if (ts.isTypeLiteralNode(node)) {
 					const members: ts.TypeElement[] = []
@@ -233,6 +303,13 @@ export function prepareTypeForParser(
 							const key = member.parameters[0]?.type
 							if (key?.kind === ts.SyntaxKind.SymbolKeyword)
 								continue
+							if (
+								key &&
+								key.kind !== ts.SyntaxKind.StringKeyword
+							) {
+								onUnresolved?.(member.getText(source))
+								continue
+							}
 							records.push(
 								context.factory.createTypeReferenceNode(
 									'Record',
@@ -302,6 +379,20 @@ export function prepareTypeForParser(
 					return ts.visitNode(node.type, visit)
 				if (ts.isPropertySignature(node)) {
 					const name = propertyName(node.name)
+					let type = node.type
+					const members = type ? unionMembers(type) : []
+					const types = members.filter(
+						(type) => type.kind !== ts.SyntaxKind.UndefinedKeyword
+					)
+					const optional =
+						members.length > 1 && types.length !== members.length
+					if (optional && type) {
+						// Undefined object values are omitted when serialized as JSON.
+						if (types.length === 1) type = types[0]
+						else if (types.length)
+							type = context.factory.createUnionTypeNode(types)
+						else type = unknown(type)
+					}
 					return context.factory.updatePropertySignature(
 						node,
 						node.modifiers?.filter(
@@ -311,9 +402,14 @@ export function prepareTypeForParser(
 						name === undefined
 							? node.name
 							: context.factory.createStringLiteral(name),
-						node.questionToken,
-						node.type
-							? (ts.visitNode(node.type, visit) as ts.TypeNode)
+						node.questionToken ??
+							(optional
+								? context.factory.createToken(
+										ts.SyntaxKind.QuestionToken
+									)
+								: undefined),
+						type
+							? (ts.visitNode(type, visit) as ts.TypeNode)
 							: undefined
 					)
 				}

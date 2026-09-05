@@ -93,11 +93,19 @@ describe('OpenAPI > multiple instances', () => {
 		expect((await app.handle(req('/openapi'))).status).toBe(404)
 	})
 
-	it('does not suppress an enabled instance after a disabled instance', async () => {
+	it('preserves enabled instance lifecycle after a disabled instance', async () => {
 		const app = new Elysia()
 			.use(openapi({ enabled: false }))
-			.use(openapi())
+			.use(
+				openapi().onBeforeHandle({ as: 'global' }, ({ set }) => {
+					set.headers['x-openapi-hook'] = 'ran'
+				})
+			)
 			.get('/', 'ok')
+			.compile()
+		expect((await app.handle(req('/'))).headers.get('x-openapi-hook')).toBe(
+			'ran'
+		)
 		expect((await app.handle(req('/openapi'))).status).toBe(200)
 		const document = await app
 			.handle(req('/openapi/json'))

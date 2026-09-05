@@ -168,7 +168,6 @@ export function declarationToJSONSchema(
 		)
 
 		const schema = TypeBox(prepareTypeForParser(processed, onUnresolved))
-		normalizeGeneratedSchema(schema, onUnresolved)
 		const properties = metadataProperties(schema)
 		if (!properties) {
 			onUnresolved(
@@ -176,9 +175,16 @@ export function declarationToJSONSchema(
 			)
 			continue
 		}
-		if (properties.response) {
-			const response = metadataProperties(properties.response)
-			if (response) properties.response = response as unknown as TSchema
+		for (const [name, value] of Object.entries(properties)) {
+			const response = name === 'response' && metadataProperties(value)
+			if (response) {
+				for (const schema of Object.values(response)) {
+					// Empty response markers are consumed before OpenAPI content is emitted.
+					if (schema.type !== 'void' && schema.type !== 'undefined')
+						normalizeGeneratedSchema(schema, onUnresolved)
+				}
+				properties.response = response as unknown as TSchema
+			} else normalizeGeneratedSchema(value, onUnresolved)
 		}
 
 		const path = '/' + route.path.join('/')
@@ -400,7 +406,8 @@ export const fromTypes =
 				const config = {
 					...(fs.existsSync(tsconfig) ? { extends: tsconfig } : {}),
 					compilerOptions: resolvedCompilerOptions,
-					include: [src]
+					include: [src],
+					exclude: []
 				}
 				const configPath = path.join(tmpRoot, 'tsconfig.json')
 				fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
@@ -476,12 +483,10 @@ export const fromTypes =
 					}
 				)
 
-				targetFile =
-					(overrideOutputPath
-						? typeof overrideOutputPath === 'string'
-							? path.resolve(distDir, overrideOutputPath)
-							: overrideOutputPath(tmpRoot)
-						: undefined) ?? targetFile
+				if (typeof overrideOutputPath === 'function')
+					targetFile = overrideOutputPath(tmpRoot) ?? targetFile
+				else if (overrideOutputPath)
+					targetFile = path.resolve(distDir, overrideOutputPath)
 
 				if (!silent || !targetFile) {
 					const diagnostics = ts.sortAndDeduplicateDiagnostics([
@@ -530,7 +535,13 @@ export const fromTypes =
 			)
 
 			const routeSection = findRouteSection(declaration, instanceName)
-			if (!routeSection) return
+			if (!routeSection) {
+				if (!silent)
+					console.warn(
+						`[@elysiajs/openapi/gen] Couldn't find ${instanceName ? `Elysia instance "${instanceName}"` : 'an Elysia instance'} with route declarations in "${src}".`
+					)
+				return
+			}
 
 			return declarationToJSONSchema(routeSection, typeAliases, {
 				silent

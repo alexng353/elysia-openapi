@@ -333,7 +333,10 @@ export function resolveImportedTypes(
 ): Record<string, string> {
 	const ts = getTypeScript()
 	const { resolve } = process.getBuiltinModule('path')
-	const aliases = { ...existingAliases }
+	const aliases: Record<string, string> = Object.assign(
+		Object.create(null),
+		existingAliases
+	)
 	const configPath = resolve(projectRoot, tsconfigPath)
 	let options: ts.CompilerOptions = {
 		module: ts.ModuleKind.ESNext,
@@ -372,9 +375,10 @@ export function resolveImportedTypes(
 	)
 	const names = new Map<ts.Symbol, string>()
 	let nextName = 0
-	const allocateName = () => {
+	const allocateName = (hint = '') => {
 		let name: string
-		do name = `__OpenAPIType${nextName++}`
+		do
+			name = `__OpenAPIType${nextName++}${hint ? '_' + hint.replace(/[^\w$]/g, '_') : ''}`
 		while (own(aliases, name))
 		return name
 	}
@@ -392,7 +396,7 @@ export function resolveImportedTypes(
 		const known = names.get(symbol)
 		if (known) return known
 		const unresolved = () => {
-			const name = allocateName()
+			const name = allocateName(symbol.getName())
 			names.set(symbol, name)
 			return name
 		}

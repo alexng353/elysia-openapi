@@ -903,11 +903,10 @@ const PLAIN_TYPES = new Set(['string', 'number', 'integer', 'boolean'])
 
 const toResponseContent = (
 	schema: OpenAPIV3.SchemaObject,
-	type: string | undefined,
-	description: string | undefined
-) =>
+	type: string | undefined
+): OpenAPIV3.ResponseObject['content'] =>
 	VOID_TYPES.has(type!)
-		? ({ type, description } as any)
+		? undefined
 		: PLAIN_TYPES.has(type!)
 			? { 'text/plain': { schema } }
 			: { 'application/json': { schema } }
@@ -931,11 +930,12 @@ const toResponseObject = (
 		openapiVersion
 	)
 	const headers = toResponseHeaders(schema, vendors, openapiVersion)
+	const content = toResponseContent(responseSchema, type)
 
 	return {
 		description: description ?? `Response for status ${status}`,
 		...(headers ? { headers } : {}),
-		content: toResponseContent(responseSchema, type, description)
+		...(content ? { content } : {})
 	}
 }
 
@@ -1041,6 +1041,7 @@ export function toOpenAPISchema(
 							if (!hooks.response) hooks.response = {}
 							else if (
 								typeof hooks.response !== 'object' ||
+								Kind in hooks.response ||
 								(hooks.response as TSchema).type ||
 								(hooks.response as TSchema).$ref ||
 								(hooks.response as any)['~standard']

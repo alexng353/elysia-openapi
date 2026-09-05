@@ -184,10 +184,9 @@ describe('Swagger', () => {
 		expect(response.paths['/void'].get.responses['204'].description).toBe(
 			'Void response'
 		)
-		expect(response.paths['/void'].get.responses['204'].content).toEqual({
-			description: 'Void response',
-			type: 'void'
-		})
+		expect(
+			response.paths['/void'].get.responses['204'].content
+		).toBeUndefined()
 	})
 
 	it('should not return content response when using Undefined type', async () => {
@@ -211,10 +210,7 @@ describe('Swagger', () => {
 		).toBe('Undefined response')
 		expect(
 			response.paths['/undefined'].get.responses['204'].content
-		).toEqual({
-			type: 'undefined',
-			description: 'Undefined response'
-		})
+		).toBeUndefined()
 	})
 
 	it('should not return content response when using Null type', async () => {
@@ -234,10 +230,9 @@ describe('Swagger', () => {
 		expect(response.paths['/null'].get.responses['204'].description).toBe(
 			'Null response'
 		)
-		expect(response.paths['/null'].get.responses['204'].content).toEqual({
-			type: 'null',
-			description: 'Null response'
-		})
+		expect(
+			response.paths['/null'].get.responses['204'].content
+		).toBeUndefined()
 	})
 
 	it('should set the required field to true when a request body is present', async () => {

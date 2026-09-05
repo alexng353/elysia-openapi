@@ -89,10 +89,23 @@ export const openapi = <
 	let totalRoutes = 0
 	let cachedSchema: OpenAPIDocument | undefined
 
-	const toFullSchema = ({
-		paths,
-		components: { schemas }
-	}: ReturnType<typeof toOpenAPISchema>): OpenAPIDocument => {
+	function openAPISchema(): OpenAPIDocument {
+		// @ts-ignore Elysia exposes parent routes through a protected method.
+		const routeCount = app.getGlobalRoutes().length
+		if (totalRoutes === routeCount && cachedSchema) return cachedSchema
+
+		const {
+			paths,
+			components: { schemas }
+		} = toOpenAPISchema(
+			app,
+			exclude,
+			references,
+			mapJsonSchema,
+			effectiveOpenAPIVersion
+		)
+		totalRoutes = routeCount
+
 		return (cachedSchema = {
 			...documentation,
 			openapi: effectiveOpenAPIVersion,
@@ -144,19 +157,7 @@ export const openapi = <
 								_integration: 'elysiajs'
 							},
 							embedSpec
-								? JSON.stringify(
-										totalRoutes === app.routes.length
-											? cachedSchema
-											: toFullSchema(
-													toOpenAPISchema(
-														app,
-														exclude,
-														references,
-														mapJsonSchema,
-														effectiveOpenAPIVersion
-													)
-												)
-									)
+								? JSON.stringify(openAPISchema())
 								: undefined
 						),
 				{
@@ -175,34 +176,15 @@ export const openapi = <
 				}
 			}
 		)
-	}).get(
-		specPath,
-		function openAPISchema(): OpenAPIDocument {
-			if (totalRoutes === app.routes.length && cachedSchema)
-				return cachedSchema
-
-			totalRoutes = app.routes.length
-
-			return toFullSchema(
-				toOpenAPISchema(
-					app,
-					exclude,
-					references,
-					mapJsonSchema,
-					effectiveOpenAPIVersion
-				)
-			)
+	}).get(specPath, openAPISchema, {
+		error({ error }) {
+			console.log('[@elysiajs/openapi] error at specPath')
+			console.warn(error)
 		},
-		{
-			error({ error }) {
-				console.log('[@elysiajs/openapi] error at specPath')
-				console.warn(error)
-			},
-			detail: {
-				hide: true
-			}
+		detail: {
+			hide: true
 		}
-	)
+	})
 
 	return app
 }

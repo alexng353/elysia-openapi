@@ -59,6 +59,70 @@ describe('Gen > declaration emission', () => {
 		)
 	})
 
+	it('compiles the requested entry even when its directory is excluded', () => {
+		const root = project({
+			'tsconfig.json': JSON.stringify({
+				compilerOptions: { strict: true, noEmitOnError: true },
+				exclude: ['src']
+			}),
+			'src/app.ts': app
+		})
+		expectMessage(
+			fromTypes('src/app.ts', {
+				projectRoot: root,
+				tmpRoot: join(root, 'emit'),
+				silent: true
+			})()
+		)
+	})
+
+	it('includes ambient declarations explicitly listed in the project configuration', () => {
+		const root = project({
+			'tsconfig.json': JSON.stringify({
+				compilerOptions: { strict: true, noEmitOnError: true },
+				files: ['types/message.d.ts']
+			}),
+			'src/app.ts': `import { Elysia } from 'elysia'
+import { message } from './message'
+export const app = new Elysia().get('/message', () => ({ message: message.text }))`,
+			'src/message.ts': `export interface Message {}
+export const message = {} as Message`,
+			'types/message.d.ts': `import '../src/message'
+declare module '../src/message' {
+    interface Message { text: string }
+}`
+		})
+		expectMessage(
+			fromTypes('src/app.ts', {
+				projectRoot: root,
+				tmpRoot: join(root, 'emit'),
+				silent: true
+			})()
+		)
+	})
+
+	it('retains optional property types when emitting Partial response declarations', () => {
+		const root = project({
+			'tsconfig.json': JSON.stringify({
+				compilerOptions: { strict: true }
+			}),
+			'src/app.ts': `import { Elysia } from 'elysia'
+export const app = new Elysia().get('/partial', () => ({} as Partial<{ id: string; count: number }>))`
+		})
+		const reference = fromTypes('src/app.ts', {
+			projectRoot: root,
+			tmpRoot: join(root, 'emit'),
+			silent: true
+		})()
+		const response = reference?.['/partial']?.get?.response?.[200]
+		expect(response).toMatchObject({
+			type: 'object',
+			properties: { id: { type: 'string' }, count: { type: 'number' } }
+		})
+		expect(response?.required).toBeUndefined()
+		expect(JSON.stringify(response)).not.toContain('"type":"undefined"')
+	})
+
 	it('includes sibling package sources without forcing the application rootDir', () => {
 		const root = project({
 			'apps/api/tsconfig.json': JSON.stringify({
@@ -252,6 +316,26 @@ response: { 200: { message: string } } } }
 		)
 	})
 
+	it('reads route declarations containing literal delimiters and function metadata', () => {
+		const root = project({
+			'src/app.d.ts': `import { Elysia } from 'elysia'
+export declare const app: Elysia<"", {}, { decorator: { convert: () => string } }, {}, {
+message: { get: { params: {}; query: unknown; headers: unknown; body: unknown;
+response: { 200: { message: "a>b,c<d" } } } }
+}>;`
+		})
+		const reference = fromTypes('src/app.d.ts', {
+			projectRoot: root,
+			tmpRoot: join(root, 'emit'),
+			silent: true
+		})()
+		expect(reference?.['/message']?.get?.response?.[200]).toMatchObject({
+			type: 'object',
+			required: ['message'],
+			properties: { message: { type: 'string', const: 'a>b,c<d' } }
+		})
+	})
+
 	it('finds an Elysia instance inferred from an imported factory', () => {
 		const root = project({
 			'tsconfig.json': JSON.stringify({
@@ -307,6 +391,54 @@ export const app = new Server().get('/message', () => ({ message: 'hello' }))`
 		)
 	})
 
+	it.each([undefined, 'missing'])(
+		'diagnoses an absent Elysia instance: %s',
+		(instanceName) => {
+			const root = project({
+				'src/app.d.ts': 'export declare const unrelated: string'
+			})
+			const warn = spyOn(console, 'warn').mockImplementation(() => {})
+			try {
+				expect(
+					fromTypes('src/app.d.ts', {
+						projectRoot: root,
+						instanceName,
+						tmpRoot: join(root, 'emit')
+					})()
+				).toBeUndefined()
+				expect(warn).toHaveBeenCalledWith(
+					expect.stringContaining(join(root, 'src/app.d.ts'))
+				)
+				if (instanceName)
+					expect(warn).toHaveBeenCalledWith(
+						expect.stringContaining(`"${instanceName}"`)
+					)
+			} finally {
+				warn.mockRestore()
+			}
+		}
+	)
+
+	it('suppresses the missing-instance diagnostic in silent mode', () => {
+		const root = project({
+			'src/app.d.ts': 'export declare const unrelated: string'
+		})
+		const warn = spyOn(console, 'warn').mockImplementation(() => {})
+		try {
+			expect(
+				fromTypes('src/app.d.ts', {
+					projectRoot: root,
+					instanceName: 'missing',
+					tmpRoot: join(root, 'emit'),
+					silent: true
+				})()
+			).toBeUndefined()
+			expect(warn).not.toHaveBeenCalled()
+		} finally {
+			warn.mockRestore()
+		}
+	})
+
 	it.each([true, false])('honors noEmitOnError: %s', (noEmitOnError) => {
 		const root = project({
 			'tsconfig.json': JSON.stringify({
@@ -355,6 +487,33 @@ export const app = new Server().get('/message', () => ({ message: 'hello' }))`
 							: kind === 'absolute'
 								? join(root, 'emit/dist/other.d.ts')
 								: (tmpRoot) => join(tmpRoot, 'dist/other.d.ts')
+				})()
+			)
+		}
+	)
+
+	it.each([
+		{ label: 'an empty string', overrideOutputPath: '' },
+		{
+			label: 'an undefined callback result',
+			overrideOutputPath: () => undefined!
+		},
+		{ label: 'a null callback result', overrideOutputPath: () => null! }
+	])(
+		'uses the emitted declaration for $label overrideOutputPath',
+		({ overrideOutputPath }) => {
+			const root = project({
+				'tsconfig.json': JSON.stringify({
+					compilerOptions: { strict: true }
+				}),
+				'src/app.ts': app
+			})
+			expectMessage(
+				fromTypes('src/app.ts', {
+					projectRoot: root,
+					tmpRoot: join(root, 'emit'),
+					silent: true,
+					overrideOutputPath
 				})()
 			)
 		}

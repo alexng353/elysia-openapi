@@ -72,7 +72,9 @@ export const app = new Elysia()
 	.get('/users', () => [{ id: '1', name: 'Alice' }])
 ```
 
-Install `typescript` in the environment that generates the references. A `.ts` or
+Install `typescript` in the environment that generates the references, including
+when parsing a route type literal. Importing the runtime plugin alone does not
+load the compiler. A `.ts` or
 `.tsx` input is compiled to declarations using TypeScript; a prebuilt `.d.ts` is
 read directly. File inputs require Node.js or Bun. You can also pass an
 object-shaped route type literal without compiling a file:
@@ -87,7 +89,9 @@ Relative input paths and `tsconfigPath` resolve from `projectRoot`, which defaul
 to the current working directory. The default input is `src/index.ts`, and the
 default config is `tsconfig.json`. The selected config's relative `extends` and
 path mappings retain their normal TypeScript resolution. Set `instanceName` when
-the file contains multiple Elysia instances.
+the file contains multiple Elysia instances. Generation selects the requested entry
+even when its directory is excluded from project discovery. Explicit `files` entries,
+including ambient declarations, remain part of the compilation.
 
 Generation extends that config with declaration-only output defaults.
 `compilerOptions` overrides those defaults; configured `rootDir`, `declarationDir`
@@ -96,13 +100,19 @@ packages can share TypeScript's inferred source root. Output discovery follows
 TypeScript's emitted files. `overrideOutputPath` can instead select a declaration:
 relative strings resolve under the temporary `dist` directory, absolute strings
 are used directly, and callbacks receive the temporary root.
+Output in a configured `declarationDir` outside the temporary root remains there
+after generation, even when `debug` is false.
 
 Imported aliases, re-exports and supported type expressions are resolved through
 TypeScript. Nested route intersections are traversed independently so that all
 paths and methods are retained. `Date` becomes a string with `format: 'date-time'`.
 Types that cannot be resolved or represented, including recursive or unsupported
 type expressions, become `unknown` (an unconstrained schema) with a diagnostic;
-type-derived references do not change runtime validation.
+type-derived references do not change runtime validation. Unsupported forms include
+interfaces and classes, number or template-pattern dictionary keys, named or
+variadic tuples, and non-JSON values such as functions and bigints. Other fields
+retain their inferred schemas. Optional properties retain their defined types
+without emitting TypeScript's `undefined` as a JSON Schema type.
 
 Use `debug: true` to retain the generated config and declarations. A custom
 `tmpRoot` must be a dedicated scratch directory: compilation clears it first,

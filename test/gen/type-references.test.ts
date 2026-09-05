@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, spyOn } from 'bun:test'
+import { declarationToJSONSchema } from '../../src/gen'
 import * as fs from 'node:fs'
 import { join } from 'node:path'
 import { TypeBox } from '@sinclair/typemap'
@@ -224,7 +225,7 @@ describe('Gen > Type references', () => {
 		const code = 'import("missing").User'
 		expect(
 			schema(code, imported(`type User = string; type Routes = ${code}`))
-		).not.toEqual({ type: 'string' })
+		).toEqual({ $ref: expect.stringMatching(/^__OpenAPIType/) })
 	})
 
 	it('follows renamed and star exports across barrels using tsconfig-relative paths', () => {
@@ -263,14 +264,16 @@ describe('Gen > Type references', () => {
 		const code = 'import("./unsupported").Payload'
 		const aliases = imported(`type Private = string; type Routes = ${code}`)
 		const result = schema(code, aliases)
-		expect(result.properties?.value).not.toEqual({ type: 'string' })
+		expect(result.properties?.value).toEqual({
+			$ref: expect.stringMatching(/^__OpenAPIType/)
+		})
 	})
 
 	it('does not resolve an unsupported enum using a same-named local alias', () => {
 		const code = 'import("./unsupported").DynamicPayload'
 		const aliases = imported(`type Dynamic = string; type Routes = ${code}`)
-		expect(schema(code, aliases).properties?.value).not.toEqual({
-			type: 'string'
+		expect(schema(code, aliases).properties?.value).toEqual({
+			$ref: expect.stringMatching(/^__OpenAPIType/)
 		})
 	})
 
@@ -280,6 +283,37 @@ describe('Gen > Type references', () => {
 		)
 		expect(schema('__proto__', aliases)).toEqual({ type: 'string' })
 		expect(schema('constructor', aliases)).toEqual({ type: 'number' })
+	})
+
+	it('resolves prototype-named aliases without pre-extracted aliases', () => {
+		const aliases = resolveImportedTypes(
+			'type __proto__ = string; type Result = __proto__',
+			fixture,
+			'config/tsconfig.json',
+			join(fixture, 'entry.ts'),
+			{},
+			fs
+		)
+		expect(schema('Result', aliases)).toEqual({ type: 'string' })
+	})
+
+	it('names an unsupported interface in the generated diagnostic', () => {
+		const declaration =
+			'type Private = string; type Routes = { example: { get: { response: { 200: import("./unsupported").Payload } } } }'
+		const warning = spyOn(console, 'warn').mockImplementation(() => {})
+		try {
+			const routes = declarationToJSONSchema(
+				'{ example: { get: { response: { 200: import("./unsupported").Payload } } } }',
+				imported(declaration)
+			)
+			expect(
+				JSON.parse(JSON.stringify(routes['/example'].get.response[200]))
+					.properties.value
+			).toEqual({})
+			expect(warning.mock.calls.flat().join(' ')).toContain('Private')
+		} finally {
+			warning.mockRestore()
+		}
 	})
 
 	it('resolves enums and imported tuples through their defining module', () => {

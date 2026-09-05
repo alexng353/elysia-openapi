@@ -1,4 +1,5 @@
 import type { TSchema } from 'elysia'
+import type { InternalRoute } from 'elysia/types'
 import type { OpenAPIV3, OpenAPIV3_1 } from 'openapi-types'
 import type { ApiReferenceConfiguration } from '@scalar/types'
 import type { SwaggerUIOptions } from './swagger/types'
@@ -81,6 +82,14 @@ export interface ElysiaOpenAPIConfig<
 		 * @default []
 		 */
 		paths?: string | RegExp | (string | RegExp)[]
+
+		/**
+		 * Exclude a route when the predicate returns true.
+		 * Receives the original Elysia path, method and hooks after built-in exclusions.
+		 */
+		routes?: (
+			route: Pick<InternalRoute, 'path' | 'method' | 'hooks'>
+		) => boolean
 
 		/**
 		 * Determine if OpenAPI should exclude static files.

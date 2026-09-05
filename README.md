@@ -140,6 +140,25 @@ List of methods to exclude from documentation
 
 List of paths to exclude from documentation
 
+## exclude.routes
+
+A synchronous predicate that excludes a route when it returns `true`. It receives
+the route's `method`, `path`, and `hooks`, including inherited `hooks.detail`.
+Methods use Elysia's uppercase names, and paths include their prefix and original
+parameter syntax, such as `/api/users/:id?`.
+
+The predicate runs after the built-in exclusions and before schema generation or
+optional parameter expansion. It cannot include routes hidden by `detail.hide` or
+another exclusion. An `.all()` route is passed once with method `ALL`.
+
+```typescript
+openapi({
+	exclude: {
+		routes: ({ hooks }) => !hooks.detail?.tags?.includes('public')
+	}
+})
+```
+
 ## exclude.staticFile
 
 @default true
@@ -170,6 +189,10 @@ OpenAPI documentation frontend between:
 
 Additional OpenAPI reference for each endpoint
 
+Reference functions are evaluated only when at least one route remains after all
+exclusions. References enrich documentation without changing route validation or
+another OpenAPI instance's schemas.
+
 ## scalar
 
 Scalar configuration, refers to [Scalar config](https://github.com/scalar/scalar/blob/main/documentation/configuration.md)
@@ -179,6 +202,26 @@ Scalar configuration, refers to [Scalar config](https://github.com/scalar/scalar
 @default '/${path}/json'
 
 The endpoint to expose OpenAPI specification in JSON format
+
+Multiple instances can expose separate specifications with different exclusions
+and documentation. Use distinct `path` values for documentation frontends. With
+`provider: null`, distinct `specPath` values are sufficient:
+
+```typescript
+const app = new Elysia()
+	.use(
+		openapi({
+			provider: null,
+			specPath: '/public.json',
+			exclude: {
+				routes: ({ hooks }) => !hooks.detail?.tags?.includes('public')
+			}
+		})
+	)
+	.use(openapi({ provider: null, specPath: '/internal.json' }))
+	.get('/users', () => [], { detail: { tags: ['public'] } })
+	.get('/admin', () => 'ok')
+```
 
 ## swagger
 

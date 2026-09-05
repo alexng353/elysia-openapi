@@ -969,22 +969,9 @@ export function toOpenAPISchema(
 	// @ts-ignore
 	const definitions = app.getGlobalDefinitions?.().type
 
-	if (references) {
-		if (!Array.isArray(references)) references = [references]
-
-		for (let i = 0; i < references.length; i++) {
-			const reference = references[i]
-
-			if (typeof reference === 'function') references[i] = reference()
-		}
-	}
-
-	// Flatten routes to merge guard() schemas into direct hook properties
-	// This makes guard schemas accessible for OpenAPI documentation generation
 	// @ts-ignore private property
-	const routes = flattenRoutes(app.getGlobalRoutes(), vendors, openapiVersion)
-	for (const route of routes) {
-		if (route.hooks?.detail?.hide) continue
+	const routes = app.getGlobalRoutes().filter((route) => {
+		if (route.hooks?.detail?.hide) return false
 
 		const method = route.method.toLowerCase()
 
@@ -999,13 +986,30 @@ export function toOpenAPISchema(
 					return exclusion === route.path
 				return false
 			}) ||
-			excludeMethods.includes(method)
+			excludeMethods.includes(method) ||
+			route.hooks?.detail?.tags?.some((tag: string) =>
+				excludeTags?.includes(tag)
+			)
 		)
-			continue
+			return false
+
+		return !exclude?.routes?.(route)
+	})
+
+	if (routes.length && references)
+		references = (
+			Array.isArray(references) ? references : [references]
+		).map((reference) =>
+			typeof reference === 'function' ? reference() : reference
+		)
+
+	// Flatten routes to merge guard() schemas into direct hook properties
+	for (const route of flattenRoutes(routes, vendors, openapiVersion)) {
+		const method = route.method.toLowerCase()
 
 		const hooks: InputSchema & {
 			detail: Partial<OpenAPIV3.OperationObject>
-		} = route.hooks ?? {}
+		} = { ...route.hooks }
 
 		if (references?.length)
 			for (const reference of references as AdditionalReference[]) {
@@ -1044,6 +1048,7 @@ export function toOpenAPISchema(
 								hooks.response = {
 									200: hooks.response as any
 								}
+							else hooks.response = { ...hooks.response }
 
 							if (
 								!hooks.response[
@@ -1061,12 +1066,6 @@ export function toOpenAPISchema(
 								}
 						}
 			}
-
-		if (
-			excludeTags &&
-			hooks.detail.tags?.some((tag) => excludeTags?.includes(tag))
-		)
-			continue
 
 		// Start building the operation object
 		const operation: Partial<OpenAPIV3.OperationObject> = {

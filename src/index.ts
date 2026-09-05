@@ -69,7 +69,12 @@ export const openapi = <
 	mapJsonSchema,
 	embedSpec
 }: ElysiaOpenAPIConfig<Enabled, Path> = {}) => {
-	if (!enabled) return new Elysia({ name: '@elysiajs/openapi' })
+	const app = new Elysia({
+		name: '@elysiajs/openapi',
+		seed: { path, specPath, enabled }
+	})
+
+	if (!enabled) return app
 
 	const info = {
 		title: 'Elysia Documentation',
@@ -115,8 +120,6 @@ export const openapi = <
 			}
 		})
 	}
-
-	const app = new Elysia({ name: '@elysiajs/openapi' })
 
 	app.use((app) => {
 		if (provider === null) return app

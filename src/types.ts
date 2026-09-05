@@ -21,14 +21,10 @@ type OpenAPIDocumentation =
 	  >
 
 export type MapJsonSchema = { [vendor: string]: Function } & {
-	[vendor in  // schema['~standard'].vendor
-		| 'zod'
-		| 'effect'
-		| 'valibot'
-		| 'arktype'
-		| 'typemap'
-		| 'yup'
-		| 'joi']?: Function
+	[
+		vendor in  // schema['~standard'].vendor
+			'zod' | 'effect' | 'valibot' | 'arktype' | 'typemap' | 'yup' | 'joi'
+	]?: Function
 }
 
 export type AdditionalReference = {
@@ -155,7 +151,7 @@ export interface ElysiaOpenAPIConfig<
 	 *'
 	 * @see https://github.com/scalar/scalar/blob/main/documentation/configuration.md
 	 */
-	scalar?: ApiReferenceConfiguration & {
+	scalar?: Partial<ApiReferenceConfiguration> & {
 		/**
 		 * Version to use for Scalar cdn bundle
 		 *

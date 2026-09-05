@@ -1,6 +1,5 @@
 import { Elysia, t } from 'elysia'
-import { openapi, withHeaders } from '../../src'
-import { fromTypes } from '../../src/gen'
+import { withHeaders } from '../../src'
 
 export const app = new Elysia()
 	.model({
@@ -21,8 +20,7 @@ export const app = new Elysia()
 		'/',
 		() =>
 			({ test: 'hello' as const }) as any as
-				| { test: 'hello' }
-				| undefined,
+				{ test: 'hello' } | undefined,
 		{
 			response: {
 				204: withHeaders(

@@ -75,6 +75,9 @@
     "license": "MIT",
     "scripts": {
         "dev": "bun run --watch example/index.ts",
+        "check": "tsc --noEmit",
+        "lint": "eslint . --max-warnings 0",
+        "lint:fix": "eslint . --fix --max-warnings 0",
         "test": "bun test && npm run test:node",
         "test:node": "npm install --prefix ./test/node/cjs/ && npm install --prefix ./test/node/esm/ && node ./test/node/cjs/index.js && node ./test/node/esm/index.js",
         "build": "bun build.ts",
@@ -82,15 +85,18 @@
     },
     "devDependencies": {
         "@apidevtools/swagger-parser": "^12.1.0",
+        "@eslint/js": "9.6.0",
         "@scalar/types": "^0.2.16",
         "@sinclair/typemap": "^0.10.1",
         "@types/bun": "1.2.20",
         "effect": "^3.21.2",
         "elysia": "1.4.25",
         "eslint": "9.6.0",
+        "globals": "^17.12.0",
         "openapi-types": "^12.1.3",
         "tsup": "^8.5.1",
         "typescript": "^5.9.3",
+        "typescript-eslint": "^8.69.0",
         "zod": "^4.3.6"
     },
     "peerDependencies": {

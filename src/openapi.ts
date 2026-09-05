@@ -1,11 +1,5 @@
 import { t, type AnyElysia, type TSchema, type InputSchema } from 'elysia'
-import type {
-	HookContainer,
-	LocalHook,
-	RouteSchema,
-	SingletonBase,
-	StandardSchemaV1Like
-} from 'elysia/types'
+import type { HookContainer, LocalHook, SingletonBase } from 'elysia/types'
 
 import type { OpenAPIV3 } from 'openapi-types'
 import { Kind, TAnySchema, type TObject } from '@sinclair/typebox'
@@ -308,7 +302,7 @@ const unwrapResponseSchema = (
 			? undefined
 			: isTSchema(schema)
 				? schema
-				: // @ts-ignore
+				: // @ts-expect-error Responses can include Standard Schema validators.
 					schema['~standard']
 					? unwrapSchema(
 							schema as any,
@@ -352,13 +346,13 @@ const mergeResponseSchema = (
 	if (incoming && !existing) return incoming as any
 	if (existing && !incoming) return existing as any
 
-	// @ts-ignore
+	// @ts-expect-error Merged responses can include Standard Schema validators.
 	if (isTSchema(existing) || existing?.['~standard'])
 		existing = {
 			200: existing as TSchema
 		}
 
-	// @ts-ignore
+	// @ts-expect-error Merged responses can include Standard Schema validators.
 	if (isTSchema(incoming) || incoming?.['~standard'])
 		incoming = {
 			200: incoming as TSchema
@@ -526,7 +520,7 @@ const unwrapReference = <T extends OpenAPIV3.SchemaObject | undefined>(
 			$ref: string
 			type: string | undefined
 	  }) => {
-	// @ts-ignore
+	// @ts-expect-error Reference objects are resolved before schema keywords are inspected.
 	const ref = schema?.$ref
 	if (!ref) return schema as any
 
@@ -551,7 +545,7 @@ export const unwrapSchema = (
 	// Already unwrapped by merging standalone validators
 	if (
 		!schema?.['~standard'] &&
-		// @ts-ignore
+		// @ts-expect-error Merged validators may already be plain JSON Schema objects.
 		(schema.$schema || schema.type || schema.properties || schema.items)
 	)
 		return nullToOpenApi(schema as OpenAPIV3.SchemaObject, openapiVersion)
@@ -647,7 +641,7 @@ export const unwrapSchema = (
 
 		return nullToOpenApi(
 			enumToOpenApi(
-				// @ts-ignore
+				// @ts-expect-error Vendor methods are outside the Standard Schema interface.
 				schema.toJSONSchema?.() ?? schema?.toJsonSchema?.()
 			),
 			openapiVersion
@@ -923,7 +917,6 @@ const toResponseObject = (
 
 	const responseSchema = stripHeaders(response)
 
-	// @ts-ignore Must exclude $ref from root options
 	const { type, description } = unwrapReference(
 		responseSchema,
 		definitions,
@@ -951,13 +944,13 @@ export function toOpenAPISchema(
 	vendors?: MapJsonSchema,
 	openapiVersion: OpenAPIVersion = '3.1.2'
 ) {
-	let {
-		methods: excludeMethods = ['options'],
+	const {
+		methods = ['options'],
 		staticFile: excludeStaticFile = true,
 		tags: excludeTags
 	} = exclude ?? {}
 
-	excludeMethods = excludeMethods.map((method) => method.toLowerCase())
+	const excludeMethods = methods.map((method) => method.toLowerCase())
 
 	const excludePaths = Array.isArray(exclude?.paths)
 		? exclude.paths
@@ -966,10 +959,11 @@ export function toOpenAPISchema(
 			: []
 
 	const paths: OpenAPIV3.PathsObject = Object.create(null)
-	// @ts-ignore
+
+	// @ts-expect-error Elysia exposes parent definitions through a protected method.
 	const definitions = app.getGlobalDefinitions?.().type
 
-	// @ts-ignore private property
+	// @ts-expect-error Elysia exposes parent routes through a protected method.
 	const routes = app.getGlobalRoutes().filter((route) => {
 		if (route.hooks?.detail?.hide) return false
 
@@ -1009,6 +1003,7 @@ export function toOpenAPISchema(
 
 		const hooks: InputSchema & {
 			detail: Partial<OpenAPIV3.OperationObject>
+			parse?: HookContainer[]
 		} = { ...route.hooks }
 
 		if (references?.length)
@@ -1057,7 +1052,7 @@ export function toOpenAPISchema(
 								]
 							)
 								try {
-									// @ts-ignore
+									// @ts-expect-error Response map keys come from Object.entries.
 									hooks.response[status] = schema
 								} catch (error) {
 									console.log(
@@ -1182,22 +1177,19 @@ export function toOpenAPISchema(
 			)
 
 			if (body) {
-				// @ts-ignore
-				const { type, description, $ref, ...options } = unwrapReference(
+				const { type, description } = unwrapReference(
 					body,
 					definitions,
 					openapiVersion
 				)
 
-				// @ts-ignore
 				if (hooks.parse) {
 					const content: Record<
 						string,
 						{ schema: OpenAPIV3.SchemaObject }
 					> = {}
 
-					// @ts-ignore
-					const parsers = hooks.parse as HookContainer[]
+					const parsers = hooks.parse
 
 					for (const parser of parsers) {
 						if (typeof parser.fn === 'function') continue
@@ -1283,7 +1275,7 @@ export function toOpenAPISchema(
 				!(hooks.response as TSchema).$ref &&
 				!(hooks.response as any)['~standard']
 			) {
-				for (let [status, schema] of Object.entries(hooks.response)) {
+				for (const [status, schema] of Object.entries(hooks.response)) {
 					const response = toResponseObject(
 						schema,
 						status,
@@ -1343,7 +1335,6 @@ export function toOpenAPISchema(
 		}
 	}
 
-	// @ts-ignore private property
 	const schemas = Object.create(null)
 
 	if (definitions)

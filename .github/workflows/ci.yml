@@ -21,6 +21,12 @@ jobs:
             - name: Install packages
               run: bun install
               
+            - name: Lint
+              run: bun run lint
+
+            - name: Type check
+              run: bun run check
+
             - name: Build code
               run: bun run build
 

@@ -207,6 +207,8 @@ another OpenAPI instance's schemas.
 
 Scalar configuration, refers to [Scalar config](https://github.com/scalar/scalar/blob/main/documentation/configuration.md)
 
+Supply only the settings you want to customize; Scalar supplies defaults for the rest.
+
 ## specPath
 
 @default '/${path}/json'
@@ -238,3 +240,16 @@ const app = new Elysia()
 Swagger config, refers to [Swagger config](https://swagger.io/docs/open-source-tools/swagger-ui/usage/configuration/)
 
 See [documentation](https://elysiajs.com/plugins/openapi.html) for more details.
+
+## Development
+
+```bash
+bun install
+bun run lint
+bun run check
+bun run build
+bun run test
+```
+
+Use `bun run lint:fix` to apply available ESLint fixes. Compiler test fixtures and
+examples are excluded from linting; the type check still covers TypeScript inputs.

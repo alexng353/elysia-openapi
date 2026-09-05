@@ -3,8 +3,10 @@ import { Elysia } from 'elysia'
 
 import { toOpenAPISchema } from '../../src/openapi'
 
-const getPathKeys = (app: Elysia, exclude?: Parameters<typeof toOpenAPISchema>[1]) =>
-	Object.keys(toOpenAPISchema(app, exclude).paths)
+const getPathKeys = (
+	app: Parameters<typeof toOpenAPISchema>[0],
+	exclude?: Parameters<typeof toOpenAPISchema>[1]
+) => Object.keys(toOpenAPISchema(app, exclude).paths)
 
 const app = new Elysia()
 	.get('/users', () => 'ok')

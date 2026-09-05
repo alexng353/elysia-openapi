@@ -26,20 +26,21 @@ const normalizeOpenAPIVersion = (version: string): OpenAPIVersion => {
 
 function isCloudflareWorker() {
 	try {
+		const workerGlobals = globalThis as typeof globalThis & {
+			caches?: { default?: unknown }
+			WebSocketPair?: unknown
+		}
 		// Check for the presence of caches.default, which is a global in Workers
 		if (
-			// @ts-ignore
-			typeof caches !== 'undefined' &&
-			// @ts-ignore
-			typeof caches.default !== 'undefined'
+			typeof workerGlobals.caches !== 'undefined' &&
+			typeof workerGlobals.caches.default !== 'undefined'
 		)
 			return true
 
-		// @ts-ignore
-		if (typeof WebSocketPair !== 'undefined') {
+		if (typeof workerGlobals.WebSocketPair !== 'undefined') {
 			return true
 		}
-	} catch (e) {
+	} catch {
 		// If accessing these globals throws an error, it's likely not a Worker
 		return false
 	}
@@ -90,7 +91,7 @@ export const openapi = <
 	let cachedSchema: OpenAPIDocument | undefined
 
 	function openAPISchema(): OpenAPIDocument {
-		// @ts-ignore Elysia exposes parent routes through a protected method.
+		// @ts-expect-error Elysia exposes parent routes through a protected method.
 		const routeCount = app.getGlobalRoutes().length
 		if (totalRoutes === routeCount && cachedSchema) return cachedSchema
 

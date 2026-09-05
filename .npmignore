@@ -17,7 +17,7 @@ src
 tests
 test
 CHANGELOG.md
-.eslintrc.js
+eslint.config.cjs
 tsconfig.cjs.json
 tsconfig.esm.json
 tsconfig.dts.json

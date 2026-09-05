@@ -254,38 +254,6 @@ describe('Gen > Type Gen', () => {
 				}
 			}`)
 
-		const property = {
-			get: {
-				body: {
-					properties: {},
-					type: 'object'
-				},
-				headers: {
-					properties: {},
-					type: 'object'
-				},
-				params: {
-					properties: {},
-					type: 'object'
-				},
-				query: {
-					properties: {},
-					type: 'object'
-				},
-				response: {
-					'200': {
-						properties: {
-							name: {
-								type: 'string'
-							}
-						},
-						required: ['name'],
-						type: 'object'
-					}
-				}
-			}
-		}
-
 		expect(serializable(reference)!).toEqual({
 			'/hello-world/2': {
 				get: {

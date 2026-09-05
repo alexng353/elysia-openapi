@@ -189,7 +189,8 @@ export function declarationToJSONSchema(
 
 		const path = '/' + route.path.join('/')
 		if (!routes[path]) routes[path] = {}
-		// @ts-ignore
+
+		// @ts-expect-error Inferred route metadata may omit request schemas.
 		routes[path][route.method] = properties
 	}
 

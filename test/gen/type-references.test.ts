@@ -145,8 +145,8 @@ describe('Gen > Type references', () => {
 
 	it('retains escaped enum literals as valid TypeScript strings', () => {
 		expect(
-			extractTypeAliases('enum Status { Escaped = "a\\\"b" }').Status
-		).toBe('"a\\\"b"')
+			extractTypeAliases('enum Status { Escaped = "a\\"b" }').Status
+		).toBe('"a\\"b"')
 	})
 
 	it('does not narrow partially computed enums to only the known members', () => {

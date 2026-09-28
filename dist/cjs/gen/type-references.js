@@ -1,0 +1,441 @@
+"use strict";
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
+// src/gen/type-references.ts
+var type_references_exports = {};
+__export(type_references_exports, {
+  extractTypeAliases: () => extractTypeAliases,
+  inlineTypeReferences: () => inlineTypeReferences,
+  resolveImportedTypes: () => resolveImportedTypes
+});
+module.exports = __toCommonJS(type_references_exports);
+
+// src/gen/typescript.ts
+var import_typescript = require("#typescript");
+
+// src/gen/type-references.ts
+var own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+var parse = (code, fileName = "openapi.ts") => {
+  const ts = (0, import_typescript.getTypeScript)();
+  return ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true);
+};
+function stripComments(code) {
+  const ts = (0, import_typescript.getTypeScript)();
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false);
+  scanner.setText(code);
+  const ranges = [];
+  let token;
+  while ((token = scanner.scan()) !== ts.SyntaxKind.EndOfFileToken)
+    if (token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia)
+      ranges.push([scanner.getTokenPos(), scanner.getTextPos(), " "]);
+  return replaceRanges(code, ranges).replace(/^\s*[|&]\s*/, "");
+}
+function replaceRanges(code, ranges) {
+  const parts = [];
+  let previousEnd = 0;
+  for (const [start, end, replacement] of ranges) {
+    parts.push(code.slice(previousEnd, start), replacement);
+    previousEnd = end;
+  }
+  parts.push(code.slice(previousEnd));
+  return parts.join("");
+}
+function createProgram(declaration, fileName, options = {}, fs) {
+  const ts = (0, import_typescript.getTypeScript)();
+  const compilerOptions = {
+    ...options,
+    types: [],
+    noEmit: true,
+    skipLibCheck: true
+  };
+  const source = parse(declaration, fileName);
+  const host = fs ? ts.createCompilerHost(compilerOptions) : {
+    getSourceFile: (name) => name === fileName ? source : void 0,
+    getDefaultLibFileName: () => "",
+    writeFile: () => {
+    },
+    getCurrentDirectory: () => "",
+    getDirectories: () => [],
+    fileExists: (name) => name === fileName,
+    readFile: (name) => name === fileName ? declaration : void 0,
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n"
+  };
+  const originalGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (name, ...args) => name.replace(/\\/g, "/") === fileName ? source : originalGetSourceFile(name, ...args);
+  if (fs) {
+    host.fileExists = fs.existsSync;
+    host.readFile = (name) => {
+      try {
+        return fs.readFileSync(name, "utf8");
+      } catch {
+        return void 0;
+      }
+    };
+  }
+  const program = ts.createProgram([fileName], compilerOptions, host);
+  return { source, checker: program.getTypeChecker(), program };
+}
+var literal = (value) => JSON.stringify(value);
+function enumBody(node, checker) {
+  const values = [];
+  for (const member of node.members) {
+    const value = checker.getConstantValue(member);
+    if (value === void 0) return;
+    values.push(literal(value));
+  }
+  return values.length ? [...new Set(values)].join(" | ") : "never";
+}
+function tupleBody(node) {
+  const ts = (0, import_typescript.getTypeScript)();
+  if (node.type && ts.isTypeOperatorNode(node.type) && node.type.operator === ts.SyntaxKind.ReadonlyKeyword && ts.isTupleTypeNode(node.type.type)) {
+    const elements = node.type.type.elements;
+    if (elements.every(ts.isLiteralTypeNode))
+      return elements.map((element) => element.getText()).join(" | ") || "never";
+  }
+  const initializer = node.initializer;
+  if (!initializer || !ts.isAsExpression(initializer) || !ts.isTypeReferenceNode(initializer.type) || initializer.type.typeName.getText() !== "const" || !ts.isArrayLiteralExpression(initializer.expression))
+    return;
+  const values = [];
+  for (const element of initializer.expression.elements) {
+    if (ts.isStringLiteral(element) || ts.isNumericLiteral(element) || element.kind === ts.SyntaxKind.TrueKeyword || element.kind === ts.SyntaxKind.FalseKeyword || ts.isPrefixUnaryExpression(element) && element.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(element.operand))
+      values.push(element.getText());
+    else return;
+  }
+  return values.join(" | ") || "never";
+}
+function queryTarget(node) {
+  const ts = (0, import_typescript.getTypeScript)();
+  if (!ts.isIndexedAccessTypeNode(node) || node.indexType.kind !== ts.SyntaxKind.NumberKeyword)
+    return;
+  let object = node.objectType;
+  while (ts.isParenthesizedTypeNode(object)) object = object.type;
+  if (ts.isTypeQueryNode(object))
+    return {
+      location: object.exprName,
+      key: `typeof ${object.exprName.getText()}[number]`
+    };
+  if (ts.isImportTypeNode(object) && object.isTypeOf && object.qualifier && ts.isLiteralTypeNode(object.argument) && ts.isStringLiteral(object.argument.literal))
+    return {
+      location: object.qualifier,
+      key: `typeof import(${JSON.stringify(object.argument.literal.text)}).${object.qualifier.getText()}[number]`
+    };
+}
+function referenceName(node) {
+  const ts = (0, import_typescript.getTypeScript)();
+  if (ts.isTypeReferenceNode(node) && !node.typeArguments?.length)
+    return node.typeName.getText();
+  if (ts.isImportTypeNode(node) && !node.isTypeOf && !node.typeArguments?.length && node.qualifier && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal))
+    return `import(${JSON.stringify(node.argument.literal.text)}).${node.qualifier.getText()}`;
+  return queryTarget(node)?.key;
+}
+function isComputedType(node) {
+  const ts = (0, import_typescript.getTypeScript)();
+  return (ts.isTypeReferenceNode(node) || ts.isImportTypeNode(node)) && !!node.typeArguments?.length || ts.isTypeQueryNode(node) || ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.KeyOfKeyword || ts.isIndexedAccessTypeNode(node) || ts.isConditionalTypeNode(node) || ts.isMappedTypeNode(node);
+}
+function extractTypeAliases(declaration) {
+  const ts = (0, import_typescript.getTypeScript)();
+  let source = parse(declaration);
+  const aliases = /* @__PURE__ */ Object.create(null);
+  let checker;
+  if (source.statements.some(ts.isEnumDeclaration))
+    ({ source, checker } = createProgram(declaration, source.fileName, {
+      noLib: true,
+      noResolve: true
+    }));
+  for (const node of source.statements) {
+    if (ts.isTypeAliasDeclaration(node) && !node.typeParameters?.length)
+      aliases[node.name.text] = stripComments(node.type.getText(source));
+    else if (ts.isEnumDeclaration(node)) {
+      const body = enumBody(node, checker);
+      if (body !== void 0) aliases[node.name.text] = body;
+    } else if (ts.isVariableStatement(node)) {
+      for (const variable of node.declarationList.declarations) {
+        if (!ts.isIdentifier(variable.name)) continue;
+        const body = tupleBody(variable);
+        if (body !== void 0)
+          aliases[`typeof ${variable.name.text}[number]`] = body;
+      }
+    }
+  }
+  return aliases;
+}
+function inlineTypeReferences(code, aliases, onUnresolved) {
+  const ts = (0, import_typescript.getTypeScript)();
+  const cache = /* @__PURE__ */ new Map();
+  const active = /* @__PURE__ */ new Set();
+  let expandedSize = 0;
+  const expand = (body) => {
+    let prefix = "type __OpenAPI = ";
+    let source = parse(prefix + body);
+    if (source.statements.length !== 1) {
+      prefix += "{";
+      source = parse(prefix + body + "}");
+    }
+    const ranges = [];
+    const replace = (node, replacement) => ranges.push([
+      node.getStart(source) - prefix.length,
+      node.end - prefix.length,
+      replacement
+    ]);
+    const visit = (node, bound = /* @__PURE__ */ new Set()) => {
+      if (ts.isFunctionLike(node) && node.typeParameters?.length)
+        bound = /* @__PURE__ */ new Set([
+          ...bound,
+          ...node.typeParameters.map(
+            (parameter) => parameter.name.text
+          )
+        ]);
+      let name = referenceName(node);
+      if (!name && isComputedType(node) && own(aliases, node.getText(source)))
+        name = node.getText(source);
+      if (name && ts.isTypeReferenceNode(node) && bound.has(name)) return;
+      if (name && !own(aliases, name) && ts.isImportTypeNode(node) && node.qualifier)
+        name = node.qualifier.getText();
+      if (name && own(aliases, name)) {
+        if (active.has(name) || active.size >= 100) {
+          onUnresolved?.(name);
+          replace(node, "unknown");
+          return;
+        }
+        let replacement = cache.get(name);
+        if (replacement === void 0) {
+          active.add(name);
+          replacement = expand(aliases[name]);
+          active.delete(name);
+          const alias = parse("type __OpenAPI = " + replacement).statements[0];
+          if (ts.isTypeAliasDeclaration(alias) && (ts.isUnionTypeNode(alias.type) || ts.isIntersectionTypeNode(alias.type) || ts.isFunctionTypeNode(alias.type) || ts.isConditionalTypeNode(alias.type)))
+            replacement = `(${replacement})`;
+          cache.set(name, replacement);
+        }
+        expandedSize += replacement.length;
+        if (expandedSize > 1e6) {
+          onUnresolved?.(name);
+          replacement = "unknown";
+        }
+        replace(node, replacement);
+        return;
+      }
+      if (ts.isImportTypeNode(node) || queryTarget(node)) {
+        onUnresolved?.(node.getText(source));
+        replace(node, "unknown");
+        return;
+      }
+      ts.forEachChild(node, (child) => visit(child, bound));
+    };
+    visit(source);
+    return replaceRanges(body, ranges);
+  };
+  return expand(code);
+}
+function resolveImportedTypes(declaration, projectRoot, tsconfigPath, sourceFilePath, existingAliases, fs, resolvedCompilerOptions) {
+  const ts = (0, import_typescript.getTypeScript)();
+  const { resolve } = process.getBuiltinModule("path");
+  const aliases = Object.assign(
+    /* @__PURE__ */ Object.create(null),
+    existingAliases
+  );
+  const configPath = resolve(projectRoot, tsconfigPath);
+  let options = {
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler
+  };
+  if (fs.existsSync(configPath)) {
+    const config = ts.getParsedCommandLineOfConfigFile(
+      configPath,
+      void 0,
+      {
+        ...ts.sys,
+        fileExists: fs.existsSync,
+        readFile: (name) => fs.existsSync(name) ? fs.readFileSync(name, "utf8") : void 0,
+        onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+          throw new Error(
+            ts.flattenDiagnosticMessageText(
+              diagnostic.messageText,
+              "\n"
+            )
+          );
+        }
+      }
+    );
+    if (config) options = config.options;
+  }
+  options = { ...options, ...resolvedCompilerOptions };
+  const fileName = resolve(projectRoot, sourceFilePath).replace(/\\/g, "/");
+  const { source, checker, program } = createProgram(
+    declaration,
+    fileName,
+    options,
+    fs
+  );
+  const names = /* @__PURE__ */ new Map();
+  let nextName = 0;
+  const allocateName = (hint = "") => {
+    let name;
+    do
+      name = `__OpenAPIType${nextName++}${hint ? "_" + hint.replace(/[^\w$]/g, "_") : ""}`;
+    while (own(aliases, name));
+    return name;
+  };
+  const register = (symbol) => {
+    if (!symbol) return;
+    if (symbol.flags & ts.SymbolFlags.Alias)
+      symbol = checker.getAliasedSymbol(symbol);
+    if (symbol.flags & ts.SymbolFlags.TypeParameter) return;
+    if (symbol.declarations?.every(
+      (node2) => program.isSourceFileDefaultLibrary(node2.getSourceFile())
+    ))
+      return;
+    const known = names.get(symbol);
+    if (known) return known;
+    const unresolved = () => {
+      const name2 = allocateName(symbol.getName());
+      names.set(symbol, name2);
+      return name2;
+    };
+    const node = symbol.declarations?.find(
+      (node2) => ts.isTypeAliasDeclaration(node2) && !node2.typeParameters?.length || ts.isEnumDeclaration(node2) || ts.isEnumMember(node2) || ts.isVariableDeclaration(node2)
+    );
+    if (!node) {
+      if (!symbol.declarations?.length) return;
+      return unresolved();
+    }
+    let body;
+    if (ts.isEnumDeclaration(node)) body = enumBody(node, checker);
+    else if (ts.isEnumMember(node)) {
+      const value = checker.getConstantValue(node);
+      if (value !== void 0) body = literal(value);
+    } else if (ts.isVariableDeclaration(node)) body = tupleBody(node);
+    else if (!ts.isTypeAliasDeclaration(node)) return;
+    if (body === void 0 && !ts.isTypeAliasDeclaration(node))
+      return unresolved();
+    let name;
+    if (node.getSourceFile() === source && ts.isTypeAliasDeclaration(node))
+      name = node.name.text;
+    else name = allocateName();
+    names.set(symbol, name);
+    aliases[name] = body ?? rewrite(node.type);
+    return name;
+  };
+  const resolveExpression = (node) => {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName) && ["Array", "ReadonlyArray", "Record"].includes(node.typeName.text)) {
+      const symbol = checker.getSymbolAtLocation(node.typeName);
+      if (symbol?.declarations?.every(
+        (declaration2) => program.isSourceFileDefaultLibrary(
+          declaration2.getSourceFile()
+        )
+      ))
+        return;
+    }
+    const type = checker.getTypeFromTypeNode(node);
+    if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return;
+    const resolved = checker.typeToTypeNode(
+      type,
+      node,
+      ts.NodeBuilderFlags.NoTruncation | ts.NodeBuilderFlags.InTypeAlias
+    );
+    if (!resolved) return;
+    const transformed = ts.transform(resolved, [
+      (context) => {
+        const visit = (child) => {
+          const location = ts.isTypeReferenceNode(child) && !child.typeArguments?.length ? child.typeName : ts.isImportTypeNode(child) && !child.typeArguments?.length ? child.qualifier : void 0;
+          if (location) {
+            const symbol = checker.getSymbolAtLocation(location) ?? (ts.isIdentifier(location) ? checker.resolveName(
+              location.text,
+              node,
+              ts.SymbolFlags.Type,
+              false
+            ) : void 0);
+            const name = register(symbol);
+            if (name)
+              return context.factory.createTypeReferenceNode(name);
+          }
+          return ts.visitEachChild(child, visit, context);
+        };
+        return (root) => ts.visitNode(root, visit);
+      }
+    ]);
+    try {
+      const text = ts.createPrinter({ removeComments: true }).printNode(
+        ts.EmitHint.Unspecified,
+        transformed.transformed[0],
+        node.getSourceFile()
+      );
+      return text === node.getText() ? void 0 : text;
+    } finally {
+      transformed.dispose();
+    }
+  };
+  const rewrite = (root) => {
+    const rootSource = root.getSourceFile();
+    const start = root.getStart(rootSource);
+    const ranges = [];
+    const visit = (node) => {
+      if (isComputedType(node) && !(rootSource === source && ts.isVariableDeclaration(node.parent))) {
+        const body = resolveExpression(node);
+        if (body !== void 0) {
+          const name = allocateName();
+          aliases[name] = body;
+          ranges.push([
+            node.getStart(rootSource) - start,
+            node.end - start,
+            name
+          ]);
+          if (rootSource === source)
+            aliases[referenceName(node) ?? node.getText(rootSource)] = name;
+          return;
+        }
+      }
+      const key = referenceName(node);
+      if (key) {
+        const location = ts.isTypeReferenceNode(node) ? node.typeName : ts.isImportTypeNode(node) ? node.qualifier : queryTarget(node).location;
+        const symbol = checker.getSymbolAtLocation(location);
+        let name = register(symbol);
+        if (!name && (ts.isImportTypeNode(node) || rootSource !== source && own(aliases, key) && !(symbol?.flags && symbol.flags & ts.SymbolFlags.TypeParameter)))
+          name = allocateName();
+        if (name) {
+          ranges.push([
+            node.getStart(rootSource) - start,
+            node.end - start,
+            name
+          ]);
+          if (rootSource === source && key !== name)
+            aliases[key] = name;
+          return;
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(root);
+    return stripComments(replaceRanges(root.getText(rootSource), ranges));
+  };
+  for (const node of source.statements) {
+    if (ts.isTypeAliasDeclaration(node) && !node.typeParameters?.length)
+      register(checker.getSymbolAtLocation(node.name));
+    else rewrite(node);
+  }
+  return aliases;
+}
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  extractTypeAliases,
+  inlineTypeReferences,
+  resolveImportedTypes
+});
